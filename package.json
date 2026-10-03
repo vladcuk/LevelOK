@@ -1,0 +1,20 @@
+{
+  "name": "levelok",
+  "version": "1.0.0",
+  "description": "Discord-бот опыта и уровней для одного сервера",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "preview": "node scripts/preview-card.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.10",
+    "discord.js": "^14.27.0",
+    "dotenv": "^18.0.5"
+  }
+}
