@@ -33,8 +33,24 @@ const COLORS = {
 // Места на пьедестале подсвечиваются
 const PODIUM = { 1: '#ffd25e', 2: '#d3dae8', 3: '#e8a06a' };
 
-const nf = new Intl.NumberFormat('ru-RU');
-const fmt = (n) => nf.format(n);
+// Сокращение больших чисел: 5320 → «5.32k», 1 240 000 → «1.24m».
+// Округляем вниз, чтобы подпись не завышала реальное значение (1999 → «1.99k», а не «2k»).
+const COMPACT_UNITS = [
+  [1e12, 't'],
+  [1e9, 'b'],
+  [1e6, 'm'],
+  [1e3, 'k'],
+];
+
+function formatCompact(n) {
+  const abs = Math.abs(n);
+  if (abs < 1000) return String(Math.trunc(n));
+  const [unit, suffix] = COMPACT_UNITS.find(([u]) => abs >= u);
+  const hundredths = Math.floor(abs / (unit / 100)); // целые сотые доли: без ошибок float
+  return `${n < 0 ? '-' : ''}${hundredths / 100}${suffix}`;
+}
+
+const fmt = formatCompact;
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -322,4 +338,4 @@ async function renderRankCard(p) {
   return canvas.encode('png');
 }
 
-module.exports = { renderRankCard };
+module.exports = { renderRankCard, formatCompact };
