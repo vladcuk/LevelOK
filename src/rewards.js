@@ -11,20 +11,20 @@ function warnOnce(key, text) {
 }
 
 // Синхронизирует роли-награды участника с его уровнем.
-// Дёргает API только если есть что менять. Возвращает id реально выданных ролей.
-async function applyRewards(member, level) {
-  if (!member) return [];
+// Дёргает API только если есть что менять. Возвращает { added, removed } — id ролей.
+// revokeAbove: снять роли за уровни выше текущего (когда админ понизил уровень).
+async function applyRewards(member, level, { revokeAbove = false } = {}) {
+  const result = { added: [], removed: [] };
+  if (!member) return result;
   const { guild } = member;
 
   // Роли, удалённые на сервере, просто пропускаем
   const entries = store.rewardList().filter((r) => guild.roles.cache.has(r.roleId));
   const earned = entries.filter((r) => r.level <= level);
-  if (earned.length === 0) return [];
-
   const top = earned[earned.length - 1];
   const stacking = store.rewards.stacking;
 
-  const wanted = stacking ? new Set(earned.map((r) => r.roleId)) : new Set([top.roleId]);
+  const wanted = new Set(stacking ? earned.map((r) => r.roleId) : top ? [top.roleId] : []);
 
   const canManage = (roleId) => {
     const role = guild.roles.cache.get(roleId);
@@ -38,28 +38,30 @@ async function applyRewards(member, level) {
 
   const toAdd = [...wanted].filter((id) => !member.roles.cache.has(id) && canManage(id));
 
+  const remove = new Set();
   // Без суммирования снимаем роли более низких уровней, но только если
   // верхняя роль уже есть у участника или будет выдана — иначе он останется ни с чем.
-  let toRemove = [];
-  if (!stacking) {
-    const topSecured = member.roles.cache.has(top.roleId) || toAdd.includes(top.roleId);
-    if (topSecured) {
-      const lower = new Set(earned.filter((r) => r.roleId !== top.roleId).map((r) => r.roleId));
-      toRemove = [...lower].filter((id) => member.roles.cache.has(id) && canManage(id));
-    }
+  if (!stacking && top && (member.roles.cache.has(top.roleId) || toAdd.includes(top.roleId))) {
+    for (const r of earned) if (r.roleId !== top.roleId) remove.add(r.roleId);
   }
+  if (revokeAbove) {
+    for (const r of entries) if (r.level > level && !wanted.has(r.roleId)) remove.add(r.roleId);
+  }
+  const toRemove = [...remove].filter((id) => member.roles.cache.has(id) && canManage(id));
 
-  const added = [];
   try {
     if (toAdd.length) {
       await member.roles.add(toAdd, REASON);
-      added.push(...toAdd);
+      result.added.push(...toAdd);
     }
-    if (toRemove.length) await member.roles.remove(toRemove, REASON);
+    if (toRemove.length) {
+      await member.roles.remove(toRemove, REASON);
+      result.removed.push(...toRemove);
+    }
   } catch (err) {
     console.error(`[rewards] Не удалось обновить роли участника ${member.id}:`, err.message);
   }
-  return added;
+  return result;
 }
 
 module.exports = { applyRewards };

@@ -19,7 +19,8 @@ const {
   PermissionFlagsBits,
   MessageFlags,
 } = require('discord.js');
-const { store, DEFAULT_SETTINGS } = require('../store');
+const { store, DEFAULT_SETTINGS, DEFAULT_LEVEL_UP } = require('../store');
+const { PLACEHOLDERS, MAX_LENGTH: LEVEL_UP_MAX_LENGTH, renderLevelUp } = require('../levelup');
 const { parseDuration, formatDuration: formatShortDuration } = require('../duration');
 
 const ACCENT = 0x3f7cff;
@@ -134,6 +135,12 @@ function categoryMenu(active) {
         .setDescription(multipliersSummary())
         .setEmoji('⚡')
         .setDefault(active === 'multipliers'),
+      new StringSelectMenuOptionBuilder()
+        .setValue('levelup')
+        .setLabel('Повышение уровня')
+        .setDescription(store.levelUp.enabled ? 'Сообщение включено' : 'Сообщение выключено')
+        .setEmoji('🎉')
+        .setDefault(active === 'levelup'),
     );
 }
 
@@ -175,6 +182,22 @@ const ITEMS = {
   },
 };
 
+// Где начисляется опыт: ветки обычных каналов и посты форумов
+const XP_TOGGLES = {
+  threads: {
+    field: 'xpInThreads',
+    emoji: '🧵',
+    title: 'Опыт в ветках',
+    hint: 'сообщения в ветках текстовых каналов',
+  },
+  forums: {
+    field: 'xpInForums',
+    emoji: '🗂️',
+    title: 'Опыт в форумах',
+    hint: 'сообщения в постах форумов и медиаканалов',
+  },
+};
+
 function xpView(notice) {
   const s = store.settings;
   const container = frame('xp', '✨ Опыт', 'Сколько опыта и как часто участники получают его за сообщения.');
@@ -190,6 +213,20 @@ function xpView(notice) {
           ),
         )
         .setButtonAccessory(button(`settings:edit:${kind}`, 'Изменить', ButtonStyle.Primary, '✏️')),
+    );
+  }
+
+  container.addSeparatorComponents(divider());
+  for (const [key, toggle] of Object.entries(XP_TOGGLES)) {
+    const on = s[toggle.field] !== false;
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(`**${toggle.emoji} ${toggle.title}** · ${on ? 'начисляется' : 'не начисляется'}\n-# ${toggle.hint}`))
+        .setButtonAccessory(
+          on
+            ? button(`settings:xp-toggle:${key}`, 'Выключить', ButtonStyle.Secondary)
+            : button(`settings:xp-toggle:${key}`, 'Включить', ButtonStyle.Success),
+        ),
     );
   }
 
@@ -442,6 +479,78 @@ function ruleView(guild, type, id, notice) {
   return view(container, notice);
 }
 
+// ───────────── категория «Повышение уровня» ─────────────
+
+// Шаблон показываем как есть; тройные кавычки ломали бы блок кода
+const showTemplate = (t) => '```\n' + t.replace(/```/g, '`​``') + '\n```';
+
+function levelUpView(user, notice) {
+  const { enabled, message } = store.levelUp;
+  const sampleReward = store.rewardList()[0]?.roleId;
+  const preview = renderLevelUp(message, {
+    userId: user.id,
+    name: user.displayName ?? user.username,
+    level: 5,
+    rewards: sampleReward ? [sampleReward] : [],
+  });
+
+  const container = frame('levelup', '🎉 Повышение уровня', 'Сообщение, которое бот отправляет в канал, когда участник получает новый уровень.')
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(
+            enabled
+              ? '🔔 **Сообщение** · включено\n-# Бот поздравляет участника в канале, где тот написал.'
+              : '🔕 **Сообщение** · выключено\n-# Уровни и роли-награды выдаются молча.',
+          ),
+        )
+        .setButtonAccessory(
+          enabled
+            ? button('settings:lu-toggle', 'Выключить', ButtonStyle.Secondary)
+            : button('settings:lu-toggle', 'Включить', ButtonStyle.Success),
+        ),
+    )
+    .addSeparatorComponents(divider())
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(`**✏️ Текст сообщения**\n${showTemplate(message)}`))
+        .setButtonAccessory(button('settings:lu-edit', 'Изменить', ButtonStyle.Primary, '✏️')),
+    )
+    .addTextDisplayComponents(
+      text(
+        '-# Переменные: ' +
+          Object.entries(PLACEHOLDERS)
+            .map(([k, v]) => `\`${k}\` — ${v}`)
+            .join(' · ') +
+          '. Если `{rewards}` нет в тексте, награда допишется отдельной строкой.',
+      ),
+    )
+    .addSeparatorComponents(divider())
+    .addTextDisplayComponents(
+      text(`**👁️ Предпросмотр** (уровень 5${sampleReward ? ', с наградой' : ''})\n${preview.split('\n').map((l) => `> ${l}`).join('\n')}`),
+    )
+    .addActionRowComponents(row(button('settings:lu-reset', 'Сбросить текст', ButtonStyle.Secondary, '🔄')));
+
+  return view(container, notice);
+}
+
+function buildLevelUpModal() {
+  return new ModalBuilder()
+    .setCustomId('settings-modal:lu')
+    .setTitle('Сообщение о повышении уровня')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('message')
+          .setLabel('Текст ({user} {name} {level} {rewards})')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(LEVEL_UP_MAX_LENGTH)
+          .setValue(store.levelUp.message),
+      ),
+    );
+}
+
 // ───────────── модальные окна ─────────────
 
 function input(id, label, value, placeholder, { required = true, maxLength = 10 } = {}) {
@@ -603,6 +712,7 @@ module.exports = {
         const category = interaction.values[0];
         if (category === 'rewards') return interaction.update(await rewardsView(guild));
         if (category === 'multipliers') return interaction.update(multipliersView(guild));
+        if (category === 'levelup') return interaction.update(levelUpView(interaction.user));
         return interaction.update(xpView());
       }
 
@@ -612,9 +722,28 @@ module.exports = {
         if (modal) await interaction.showModal(modal);
         return;
       }
+      case 'xp-toggle': {
+        const toggle = XP_TOGGLES[arg];
+        if (!toggle) return interaction.update(xpView());
+        const enabled = store.settings[toggle.field] === false;
+        store.updateSettings({ [toggle.field]: enabled });
+        return interaction.update(xpView(`✅ ${toggle.title}: ${enabled ? 'включён' : 'выключен'}.`));
+      }
       case 'reset':
         store.updateSettings({ ...DEFAULT_SETTINGS });
         return interaction.update(xpView('🔄 Параметры опыта сброшены по умолчанию.'));
+
+      // Категория «Повышение уровня»
+      case 'lu-toggle': {
+        const enabled = !store.levelUp.enabled;
+        store.updateLevelUp({ enabled });
+        return interaction.update(levelUpView(interaction.user, `✅ Сообщение о повышении ${enabled ? 'включено' : 'выключено'}.`));
+      }
+      case 'lu-edit':
+        return interaction.showModal(buildLevelUpModal());
+      case 'lu-reset':
+        store.updateLevelUp({ message: DEFAULT_LEVEL_UP.message });
+        return interaction.update(levelUpView(interaction.user, '🔄 Текст сброшен по умолчанию.'));
 
       // Категория «Роли награды»
       case 'rw-page':
@@ -719,6 +848,13 @@ module.exports = {
   async handleModal(interaction) {
     if (!isAdmin(interaction)) return interaction.reply(NO_ACCESS);
     const [, kind, typeArg, targetId] = interaction.customId.split(':');
+
+    if (kind === 'lu') {
+      const message = interaction.fields.getTextInputValue('message').trim();
+      if (!message) return interaction.reply(ephemeral('❌ Текст не может быть пустым. Чтобы не отправлять сообщение — выключите его.'));
+      store.updateLevelUp({ message: message.slice(0, LEVEL_UP_MAX_LENGTH) });
+      return interaction.update(levelUpView(interaction.user, '✅ Текст сохранён.'));
+    }
 
     if (kind === 'mx') {
       const type = MULTIPLIER_TYPES[typeArg];

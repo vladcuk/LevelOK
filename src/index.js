@@ -5,8 +5,15 @@ const { store } = require('./store');
 const { levelInfo, randomXp } = require('./levels');
 const { applyRewards } = require('./rewards');
 const { effectiveMultiplier } = require('./multipliers');
+const { renderLevelUp, xpAllowedIn } = require('./levelup');
 
-const commands = [require('./commands/rank'), require('./commands/leaderboard'), require('./commands/settings')];
+const commands = [
+  require('./commands/rank'),
+  require('./commands/leaderboard'),
+  require('./commands/settings'),
+  require('./commands/xp'),
+  require('./commands/level'),
+];
 const byName = new Map(commands.map((c) => [c.data.name, c]));
 
 const { DISCORD_TOKEN, GUILD_ID } = process.env;
@@ -50,6 +57,9 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.inGuild() || !isTargetGuild(message.guildId)) return;
 
   const settings = store.settings;
+  // В ветках и постах форумов опыт можно отключить в /settings → «Опыт»
+  if (!xpAllowedIn(message.channel, settings)) return;
+
   const user = store.getUser(message.author.id);
   const now = Date.now();
 
@@ -69,15 +79,19 @@ client.on(Events.MessageCreate, async (message) => {
 
   // Синхронизируем и без повышения уровня: так роли подтянутся, если награду
   // настроили уже после того, как участник набрал нужный уровень.
-  const granted = await applyRewards(message.member, after);
+  const { added } = await applyRewards(message.member, after);
 
-  if (after > before) {
-    let content = `🎉 ${message.author}, поздравляем! Вы достигли **${after}** уровня.`;
-    if (granted.length) content += `\n🎁 Награда: ${granted.map((id) => `<@&${id}>`).join(' ')}`;
+  if (after > before && store.levelUp.enabled) {
+    const content = renderLevelUp(store.levelUp.message, {
+      userId: message.author.id,
+      name: message.member?.displayName ?? message.author.displayName,
+      level: after,
+      rewards: added,
+    });
     message.channel
       .send({
         content,
-        allowedMentions: { users: [message.author.id] }, // роли в сообщении не пингуются
+        allowedMentions: { users: [message.author.id] }, // роли и @everyone в сообщении не пингуются
       })
       .catch(() => {});
   }

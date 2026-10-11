@@ -9,6 +9,14 @@ const DEFAULT_SETTINGS = {
   xpMax: 25,
   cooldown: 60, // секунд между начислениями опыта одному пользователю
   multiplier: 1,
+  xpInThreads: true, // опыт за сообщения в ветках обычных каналов
+  xpInForums: true, // опыт за сообщения в постах форумов
+};
+
+// Сообщение о повышении уровня. Переменные: {user} {name} {level} {rewards}
+const DEFAULT_LEVEL_UP = {
+  enabled: true,
+  message: '🎉 {user}, поздравляем! Вы достигли **{level}** уровня.',
 };
 
 // Роли-награды за уровни. `roles`: { "<уровень>": "<id роли>" }.
@@ -37,6 +45,7 @@ class Store {
       settings: { ...DEFAULT_SETTINGS },
       rewards: { ...DEFAULT_REWARDS, roles: {} },
       multipliers: { rules: [] },
+      levelUp: { ...DEFAULT_LEVEL_UP },
       users: {},
     };
     this.saveTimer = null;
@@ -57,6 +66,7 @@ class Store {
           .filter(isValidRule)
           .map((r) => ({ ...r, expiresAt: r.expiresAt ?? null, createdAt: r.createdAt ?? Date.now() })),
       };
+      this.data.levelUp = { ...DEFAULT_LEVEL_UP, ...raw.levelUp };
       this.data.users = raw.users ?? {};
     } catch (err) {
       console.error('[store] Не удалось прочитать db.json, начинаю с пустой базы:', err);
@@ -88,6 +98,15 @@ class Store {
 
   updateSettings(patch) {
     Object.assign(this.data.settings, patch);
+    this.scheduleSave();
+  }
+
+  get levelUp() {
+    return this.data.levelUp;
+  }
+
+  updateLevelUp(patch) {
+    Object.assign(this.data.levelUp, patch);
     this.scheduleSave();
   }
 
@@ -179,4 +198,4 @@ class Store {
   }
 }
 
-module.exports = { store: new Store(), DEFAULT_SETTINGS };
+module.exports = { store: new Store(), DEFAULT_SETTINGS, DEFAULT_LEVEL_UP };
