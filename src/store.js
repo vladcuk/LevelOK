@@ -19,11 +19,26 @@ const DEFAULT_REWARDS = {
   roles: {},
 };
 
+// Множители на каналы/категории и роли. Правило: { type: 'channel' | 'role', id, value,
+// expiresAt (мс с эпохи или null — бессрочно), createdAt }. На одну цель — одно правило.
+// При начислении опыта действует наибольший из подходящих множителей (см. multipliers.js).
+const isValidRule = (r) =>
+  r &&
+  (r.type === 'channel' || r.type === 'role') &&
+  typeof r.id === 'string' &&
+  Number.isFinite(r.value) &&
+  (r.expiresAt == null || Number.isFinite(r.expiresAt));
+
 // Простое JSON-хранилище: бот работает на одном сервере, этого хватает с запасом.
 // Запись на диск отложенная (debounce) и атомарная (через временный файл).
 class Store {
   constructor() {
-    this.data = { settings: { ...DEFAULT_SETTINGS }, rewards: { ...DEFAULT_REWARDS, roles: {} }, users: {} };
+    this.data = {
+      settings: { ...DEFAULT_SETTINGS },
+      rewards: { ...DEFAULT_REWARDS, roles: {} },
+      multipliers: { rules: [] },
+      users: {},
+    };
     this.saveTimer = null;
     this.load();
   }
@@ -36,6 +51,11 @@ class Store {
       this.data.rewards = {
         stacking: raw.rewards?.stacking ?? DEFAULT_REWARDS.stacking,
         roles: { ...raw.rewards?.roles },
+      };
+      this.data.multipliers = {
+        rules: (Array.isArray(raw.multipliers?.rules) ? raw.multipliers.rules : [])
+          .filter(isValidRule)
+          .map((r) => ({ ...r, expiresAt: r.expiresAt ?? null, createdAt: r.createdAt ?? Date.now() })),
       };
       this.data.users = raw.users ?? {};
     } catch (err) {
@@ -95,6 +115,45 @@ class Store {
   setStacking(enabled) {
     this.data.rewards.stacking = Boolean(enabled);
     this.scheduleSave();
+  }
+
+  // Действующие правила (без истёкших): сначала самые большие множители
+  multiplierRules(now = Date.now()) {
+    return this.data.multipliers.rules
+      .filter((r) => r.expiresAt === null || r.expiresAt > now)
+      .sort((a, b) => b.value - a.value || a.createdAt - b.createdAt);
+  }
+
+  findMultiplier(type, id) {
+    return this.data.multipliers.rules.find((r) => r.type === type && r.id === id) ?? null;
+  }
+
+  // Правило на ту же цель заменяется
+  setMultiplier({ type, id, value, expiresAt }) {
+    const rules = this.data.multipliers.rules;
+    const existing = this.findMultiplier(type, id);
+    if (existing) Object.assign(existing, { value, expiresAt });
+    else rules.push({ type, id, value, expiresAt, createdAt: Date.now() });
+    this.scheduleSave();
+  }
+
+  removeMultiplier(type, id) {
+    const rules = this.data.multipliers.rules;
+    const idx = rules.findIndex((r) => r.type === type && r.id === id);
+    if (idx !== -1) rules.splice(idx, 1);
+    this.scheduleSave();
+  }
+
+  // Убирает истёкшие правила из базы; возвращает, сколько удалено
+  purgeExpiredMultipliers(now = Date.now()) {
+    const rules = this.data.multipliers.rules;
+    const kept = rules.filter((r) => r.expiresAt === null || r.expiresAt > now);
+    const removed = rules.length - kept.length;
+    if (removed) {
+      this.data.multipliers.rules = kept;
+      this.scheduleSave();
+    }
+    return removed;
   }
 
   getUser(id) {

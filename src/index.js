@@ -4,6 +4,7 @@ const { Client, GatewayIntentBits, Events, MessageFlags } = require('discord.js'
 const { store } = require('./store');
 const { levelInfo, randomXp } = require('./levels');
 const { applyRewards } = require('./rewards');
+const { effectiveMultiplier } = require('./multipliers');
 
 const commands = [require('./commands/rank'), require('./commands/leaderboard'), require('./commands/settings')];
 const byName = new Map(commands.map((c) => [c.data.name, c]));
@@ -38,6 +39,9 @@ client.once(Events.ClientReady, async (c) => {
   }
 });
 
+// Истёкшие временные множители не действуют и без этого, но убираем их и из базы
+setInterval(() => store.purgeExpiredMultipliers(), 10 * 60 * 1000).unref();
+
 client.on(Events.GuildCreate, (guild) => {
   if (isTargetGuild(guild.id)) registerCommands(guild).catch(console.error);
 });
@@ -56,7 +60,8 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   const before = levelInfo(user.xp).level;
-  user.xp += randomXp(settings);
+  // Из общего множителя и подходящих правил (канал/категория/роли) берётся наибольший
+  user.xp += randomXp({ ...settings, multiplier: effectiveMultiplier(message).value });
   user.lastXpAt = now;
   store.setUser(message.author.id, user);
 
