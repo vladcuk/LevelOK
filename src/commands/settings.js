@@ -11,6 +11,8 @@ const {
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   RoleSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  ChannelType,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
@@ -18,6 +20,7 @@ const {
   MessageFlags,
 } = require('discord.js');
 const { store, DEFAULT_SETTINGS } = require('../store');
+const { parseDuration, formatDuration: formatShortDuration } = require('../duration');
 
 const ACCENT = 0x3f7cff;
 
@@ -31,6 +34,21 @@ const LIMITS = {
 const MAX_REWARDS = 20;
 // Лимит Components V2 — 40 компонентов на сообщение; пункт награды занимает 3 (секция, текст, кнопка)
 const REWARDS_PER_PAGE = 5;
+
+// Множители отображаются так же, как награды: 3 компонента на пункт
+const MAX_MULTIPLIERS = 20;
+const MULTIPLIERS_PER_PAGE = 5;
+const MULTIPLIER_TYPES = { c: 'channel', r: 'role' };
+// Каналы, на которые можно навесить множитель (категория действует на все свои каналы)
+const MULTIPLIER_CHANNEL_TYPES = [
+  ChannelType.GuildText,
+  ChannelType.GuildAnnouncement,
+  ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice,
+  ChannelType.GuildForum,
+  ChannelType.GuildMedia,
+  ChannelType.GuildCategory,
+];
 
 // ───────────── форматирование ─────────────
 
@@ -74,6 +92,12 @@ function rewardsSummary() {
   return `${count} ${plural(count, 'награда', 'награды', 'наград')} · ${mode}`;
 }
 
+function multipliersSummary() {
+  const count = store.multiplierRules().length;
+  if (count === 0) return 'На каналы, категории и роли';
+  return `${count} ${plural(count, 'правило', 'правила', 'правил')} · действует наибольший`;
+}
+
 // ───────────── Components V2: заготовки ─────────────
 
 const text = (markdown) => new TextDisplayBuilder().setContent(markdown);
@@ -104,6 +128,12 @@ function categoryMenu(active) {
         .setDescription(rewardsSummary())
         .setEmoji('🏆')
         .setDefault(active === 'rewards'),
+      new StringSelectMenuOptionBuilder()
+        .setValue('multipliers')
+        .setLabel('Множители')
+        .setDescription(multipliersSummary())
+        .setEmoji('⚡')
+        .setDefault(active === 'multipliers'),
     );
 }
 
@@ -140,7 +170,7 @@ const ITEMS = {
   multiplier: {
     emoji: '📈',
     title: 'Общий множитель',
-    hint: `умножает весь опыт, от ×${LIMITS.multiplier.min} до ×${LIMITS.multiplier.max}`,
+    hint: `умножает весь опыт, от ×${LIMITS.multiplier.min} до ×${LIMITS.multiplier.max}; больший множитель из «Множителей» приоритетнее`,
     value: (s) => formatMultiplier(s.multiplier),
   },
 };
@@ -270,15 +300,157 @@ function pickRoleView(guild, level, notice) {
   return view(container, notice);
 }
 
+// ───────────── категория «Множители» ─────────────
+
+// Страница списка, на которой лежит правило (список отсортирован по убыванию множителя)
+function multiplierPageOf(type, id) {
+  const idx = store.multiplierRules().findIndex((r) => r.type === type && r.id === id);
+  return idx === -1 ? 0 : Math.floor(idx / MULTIPLIERS_PER_PAGE);
+}
+
+const typeCode = (type) => (type === 'role' ? 'r' : 'c');
+
+// Цель правила: роль, канал или категория; она могла быть удалена с сервера
+function targetOf(guild, rule) {
+  if (rule.type === 'role') {
+    const exists = guild.roles.cache.has(rule.id);
+    return { icon: '👥', label: exists ? `<@&${rule.id}>` : '`роль удалена`', missing: !exists };
+  }
+  const channel = guild.channels.cache.get(rule.id);
+  return {
+    icon: channel?.type === ChannelType.GuildCategory ? '📁' : '💬',
+    label: channel ? `<#${rule.id}>` : '`канал удалён`',
+    missing: !channel,
+  };
+}
+
+const unix = (ms) => Math.floor(ms / 1000);
+
+// Срок: «закончится через …» с живым отсчётом Discord или «бессрочно»
+function expiryText(rule) {
+  return rule.expiresAt ? `⏳ закончится <t:${unix(rule.expiresAt)}:R>` : '♾️ бессрочно';
+}
+
+function describeRule(guild, rule) {
+  const target = targetOf(guild, rule);
+  const global = store.settings.multiplier;
+  const notes = [expiryText(rule)];
+  if (target.missing) notes.push('⚠️ цель удалена');
+  else if (rule.value <= global) notes.push(`не действует: общий ${formatMultiplier(global)} не меньше`);
+  return `${target.icon} ${target.label} · **${formatMultiplier(rule.value)}**\n-# ${notes.join(' · ')}`;
+}
+
+function multipliersView(guild, page = 0, notice) {
+  store.purgeExpiredMultipliers();
+  const rules = store.multiplierRules();
+  const global = store.settings.multiplier;
+  const pages = Math.max(1, Math.ceil(rules.length / MULTIPLIERS_PER_PAGE));
+  const current = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const slice = rules.slice(current * MULTIPLIERS_PER_PAGE, (current + 1) * MULTIPLIERS_PER_PAGE);
+
+  const container = frame(
+    'multipliers',
+    '⚡ Множители',
+    `Дополнительные множители на каналы, категории и роли, можно временные. ` +
+      `Из всех подходящих действует **наибольший**; общий множитель (**${formatMultiplier(global)}**) тоже учитывается.`,
+  );
+
+  if (slice.length === 0) {
+    container.addTextDisplayComponents(text('*Множителей пока нет — нажмите «Добавить множитель».*'));
+  }
+  // У каждого правила своя кнопка
+  for (const rule of slice) {
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(describeRule(guild, rule)))
+        .setButtonAccessory(
+          button(`settings:mx-edit:${typeCode(rule.type)}:${rule.id}`, 'Изменить', ButtonStyle.Secondary, '✏️'),
+        ),
+    );
+  }
+
+  const controls = [button('settings:mx-add', 'Добавить множитель', ButtonStyle.Success, '➕')];
+  if (pages > 1) {
+    controls.push(
+      button(`settings:mx-page:${current - 1}`, '◀', ButtonStyle.Secondary).setDisabled(current === 0),
+      button('settings:mx-noop', `${current + 1}/${pages}`, ButtonStyle.Secondary).setDisabled(true),
+      button(`settings:mx-page:${current + 1}`, '▶', ButtonStyle.Secondary).setDisabled(current === pages - 1),
+    );
+  }
+  container.addSeparatorComponents(divider()).addActionRowComponents(row(...controls));
+
+  return view(container, notice);
+}
+
+// Выбор цели нового правила: канал/категория или роль (сразу после выбора откроется форма)
+function addMultiplierView(notice) {
+  const container = frame(
+    'multipliers',
+    '➕ Новый множитель',
+    'Выберите канал, категорию или роль — затем зададите значение и срок. ' +
+      'Множитель категории действует на все её каналы; для той же цели правило заменяется.',
+  )
+    .addActionRowComponents(
+      row(
+        new ChannelSelectMenuBuilder()
+          .setCustomId('settings:mx-pickch')
+          .setPlaceholder('💬 Канал или категория…')
+          .setChannelTypes(...MULTIPLIER_CHANNEL_TYPES)
+          .setMinValues(1)
+          .setMaxValues(1),
+      ),
+    )
+    .addActionRowComponents(
+      row(
+        new RoleSelectMenuBuilder()
+          .setCustomId('settings:mx-pickrole')
+          .setPlaceholder('👥 Роль…')
+          .setMinValues(1)
+          .setMaxValues(1),
+      ),
+    )
+    .addActionRowComponents(row(button('settings:mx-page:0', 'Отмена', ButtonStyle.Secondary, '✖️')));
+
+  return view(container, notice);
+}
+
+// Экран одного правила: подробности, изменить значение и срок, удалить
+function ruleView(guild, type, id, notice) {
+  const rule = store.multiplierRules().find((r) => r.type === type && r.id === id);
+  if (!rule) return multipliersView(guild, 0, 'Этого множителя уже нет — возможно, истёк срок.');
+
+  const target = targetOf(guild, rule);
+  const global = store.settings.multiplier;
+  const lines = [
+    `${target.icon} **Цель:** ${target.label}`,
+    `⚡ **Множитель:** ${formatMultiplier(rule.value)}`,
+    `⏳ **Срок:** ${rule.expiresAt ? `до <t:${unix(rule.expiresAt)}:f> (<t:${unix(rule.expiresAt)}:R>)` : 'бессрочно'}`,
+  ];
+  if (!target.missing && rule.value <= global) {
+    lines.push(`-# Сейчас не действует: общий множитель ${formatMultiplier(global)} не меньше.`);
+  }
+
+  const container = frame('multipliers', `⚡ Множитель ${formatMultiplier(rule.value)}`, lines.join('\n'))
+    .addActionRowComponents(
+      row(
+        button(`settings:mx-modal:${typeCode(type)}:${id}`, 'Изменить значение и срок', ButtonStyle.Primary, '✏️'),
+        button(`settings:mx-del:${typeCode(type)}:${id}`, 'Удалить', ButtonStyle.Danger, '🗑️'),
+        button(`settings:mx-page:${multiplierPageOf(type, id)}`, 'К списку', ButtonStyle.Secondary, '↩️'),
+      ),
+    );
+
+  return view(container, notice);
+}
+
 // ───────────── модальные окна ─────────────
 
-function input(id, label, value, placeholder) {
+function input(id, label, value, placeholder, { required = true, maxLength = 10 } = {}) {
   const field = new TextInputBuilder()
     .setCustomId(id)
     .setLabel(label)
     .setStyle(TextInputStyle.Short)
-    .setRequired(true)
-    .setMaxLength(10)
+    .setRequired(required)
+    .setMaxLength(maxLength)
     .setPlaceholder(placeholder);
   if (value !== undefined) field.setValue(String(value));
   return new ActionRowBuilder().addComponents(field);
@@ -312,6 +484,22 @@ function buildModal(kind) {
     default:
       return null;
   }
+}
+
+// Форма множителя: значение и срок. Для существующего правила поля заполнены
+// (срок — оставшееся время; новый срок отсчитывается от момента сохранения).
+function buildMultiplierModal(type, id, rule) {
+  const remaining = rule?.expiresAt ? Math.max(0, rule.expiresAt - Date.now()) : 0;
+  return new ModalBuilder()
+    .setCustomId(`settings-modal:mx:${typeCode(type)}:${id}`)
+    .setTitle(rule ? 'Изменить множитель' : 'Новый множитель')
+    .addComponents(
+      input('value', 'Множитель (от 0.1 до 10)', rule?.value, 'например, 2'),
+      input('duration', 'Срок (пусто — без срока)', remaining ? formatShortDuration(remaining) : undefined, '1д, 12ч, 2д 6ч, 30м', {
+        required: false,
+        maxLength: 20,
+      }),
+    );
 }
 
 const INTEGER_RE = /^-?\d+$/;
@@ -357,6 +545,21 @@ function validate(kind, fields) {
   return { error: 'Неизвестная настройка.' };
 }
 
+// { value, expiresAt } или { error }
+function validateMultiplier(fields) {
+  const value = parseNumber(fields.getTextInputValue('value'), { integer: false });
+  const { min: lo, max: hi } = LIMITS.multiplier;
+  if (value === null || value < lo || value > hi) return { error: `Множитель должен быть от ${lo} до ${hi}.` };
+
+  const duration = parseDuration(fields.getTextInputValue('duration'));
+  if (duration.error) return { error: duration.error };
+
+  return {
+    value: Math.round(value * 100) / 100,
+    expiresAt: duration.ms === null ? null : Date.now() + duration.ms,
+  };
+}
+
 // ───────────── обработчики ─────────────
 
 function isAdmin(interaction) {
@@ -368,6 +571,10 @@ const NO_ACCESS = ephemeral('Нужно право «Управлять серв
 
 function rewardsFull(level) {
   return store.rewardList().length >= MAX_REWARDS && !(level in store.rewards.roles);
+}
+
+function multipliersFull(type, id) {
+  return store.multiplierRules().length >= MAX_MULTIPLIERS && !store.findMultiplier(type, id);
 }
 
 const validLevel = (level) =>
@@ -387,13 +594,17 @@ module.exports = {
   // Кнопки и меню: customId = settings:<действие>[:<аргумент>]
   async handleComponent(interaction) {
     if (!isAdmin(interaction)) return interaction.reply(NO_ACCESS);
-    const [, action, arg] = interaction.customId.split(':');
+    const [, action, arg, arg2] = interaction.customId.split(':');
     const { guild } = interaction;
 
     switch (action) {
       // Меню категорий
-      case 'cat':
-        return interaction.update(interaction.values[0] === 'rewards' ? await rewardsView(guild) : xpView());
+      case 'cat': {
+        const category = interaction.values[0];
+        if (category === 'rewards') return interaction.update(await rewardsView(guild));
+        if (category === 'multipliers') return interaction.update(multipliersView(guild));
+        return interaction.update(xpView());
+      }
 
       // Категория «Опыт»
       case 'edit': {
@@ -456,6 +667,49 @@ module.exports = {
           await rewardsView(guild, pageOf(level), `✅ Награда за ${level} уровень сохранена: ${role.name}.`),
         );
       }
+
+      // Категория «Множители»: arg = c|r (канал/роль), arg2 = id цели
+      case 'mx-page':
+        return interaction.update(multipliersView(guild, Number(arg)));
+      case 'mx-noop':
+        return interaction.deferUpdate();
+      case 'mx-add':
+        return interaction.update(addMultiplierView());
+      case 'mx-pickch': {
+        const id = interaction.values[0];
+        if (!guild.channels.cache.has(id)) return interaction.update(addMultiplierView('❌ Канал не найден. Выберите другой.'));
+        if (multipliersFull('channel', id)) {
+          return interaction.update(multipliersView(guild, 0, `❌ Можно настроить не более ${MAX_MULTIPLIERS} множителей.`));
+        }
+        return interaction.showModal(buildMultiplierModal('channel', id, store.findMultiplier('channel', id)));
+      }
+      case 'mx-pickrole': {
+        const id = interaction.values[0];
+        if (id === guild.id) {
+          return interaction.update(
+            addMultiplierView('❌ На @everyone множитель не нужен — используйте общий во вкладке «Опыт».'),
+          );
+        }
+        if (!guild.roles.cache.has(id)) return interaction.update(addMultiplierView('❌ Роль не найдена. Выберите другую.'));
+        if (multipliersFull('role', id)) {
+          return interaction.update(multipliersView(guild, 0, `❌ Можно настроить не более ${MAX_MULTIPLIERS} множителей.`));
+        }
+        return interaction.showModal(buildMultiplierModal('role', id, store.findMultiplier('role', id)));
+      }
+      case 'mx-edit':
+        return interaction.update(ruleView(guild, MULTIPLIER_TYPES[arg], arg2));
+      case 'mx-modal': {
+        const type = MULTIPLIER_TYPES[arg];
+        const rule = store.multiplierRules().find((r) => r.type === type && r.id === arg2);
+        if (!rule) return interaction.update(multipliersView(guild, 0, 'Этого множителя уже нет — возможно, истёк срок.'));
+        return interaction.showModal(buildMultiplierModal(type, arg2, rule));
+      }
+      case 'mx-del': {
+        const type = MULTIPLIER_TYPES[arg];
+        const page = multiplierPageOf(type, arg2);
+        store.removeMultiplier(type, arg2);
+        return interaction.update(multipliersView(guild, page, '🗑️ Множитель удалён.'));
+      }
       default:
         // Кнопки старых панелей (до перехода на Components V2 и до смены раскладки)
         return interaction.reply(ephemeral('Эта панель устарела — откройте /settings заново.'));
@@ -464,7 +718,22 @@ module.exports = {
 
   async handleModal(interaction) {
     if (!isAdmin(interaction)) return interaction.reply(NO_ACCESS);
-    const kind = interaction.customId.split(':')[1];
+    const [, kind, typeArg, targetId] = interaction.customId.split(':');
+
+    if (kind === 'mx') {
+      const type = MULTIPLIER_TYPES[typeArg];
+      if (!type || !targetId) return interaction.reply(ephemeral('Неизвестная настройка.'));
+      const { value, expiresAt, error: mxError } = validateMultiplier(interaction.fields);
+      if (mxError) return interaction.reply(ephemeral(`❌ ${mxError}`));
+      if (multipliersFull(type, targetId)) {
+        return interaction.reply(ephemeral(`❌ Можно настроить не более ${MAX_MULTIPLIERS} множителей.`));
+      }
+      store.setMultiplier({ type, id: targetId, value, expiresAt });
+      return interaction.update(
+        multipliersView(interaction.guild, multiplierPageOf(type, targetId), `✅ Множитель ${formatMultiplier(value)} сохранён.`),
+      );
+    }
+
     const { patch, level, error } = validate(kind, interaction.fields);
     if (error) return interaction.reply(ephemeral(`❌ ${error}`));
 

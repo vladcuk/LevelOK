@@ -11,21 +11,27 @@ GlobalFonts.registerFromPath(path.join(FONT_DIR, 'Inter-ExtraBold.ttf'), 'Inter 
 const FALLBACK = 'sans-serif';
 const font = (weight, size) => `${size}px "Inter ${weight}", ${FALLBACK}`;
 
-const W = 1000;
-const H = 300;
+// Карточка узкая, Discord показывает её примерно вдвое меньше натуральной ширины,
+// поэтому шрифты крупные: самый мелкий текст — 18 px.
+const W = 900;
+const H = 340;
 const SCALE = 2; // рисуем в 2x для чёткости на любых экранах
 
 const COLORS = {
-  bgTop: '#14161c',
-  bgBottom: '#0c0d11',
-  border: 'rgba(255,255,255,0.06)',
-  text: '#f2f4f8',
-  muted: '#8a90a0',
-  faint: '#5b6070',
-  track: '#22252e',
+  bgTop: '#151822',
+  bgBottom: '#0b0c11',
+  border: 'rgba(255,255,255,0.08)',
+  text: '#f4f6fb',
+  muted: '#9aa1b2',
+  track: '#1e212b',
+  tile: 'rgba(255,255,255,0.045)',
+  tileBorder: 'rgba(255,255,255,0.07)',
   accentA: '#3f7cff',
   accentB: '#35d0ff',
 };
+
+// Места на пьедестале подсвечиваются
+const PODIUM = { 1: '#ffd25e', 2: '#d3dae8', 3: '#e8a06a' };
 
 const nf = new Intl.NumberFormat('ru-RU');
 const fmt = (n) => nf.format(n);
@@ -47,11 +53,33 @@ function fitText(ctx, text, maxWidth) {
   return `${t}…`;
 }
 
+// Подбирает размер шрифта, чтобы текст влез в maxWidth (но не мельче minSize)
+function fitFont(ctx, weight, size, minSize, text, maxWidth) {
+  let s = size;
+  ctx.font = font(weight, s);
+  while (s > minSize && ctx.measureText(text).width > maxWidth) {
+    s -= 1;
+    ctx.font = font(weight, s);
+  }
+  return s;
+}
+
 function accentGradient(ctx, x0, x1) {
   const g = ctx.createLinearGradient(x0, 0, x1, 0);
   g.addColorStop(0, COLORS.accentA);
   g.addColorStop(1, COLORS.accentB);
   return g;
+}
+
+// Подпись заглавными с небольшим разрежением — выглядит аккуратнее и читается лучше
+function label(ctx, str, x, y, align = 'left') {
+  ctx.save();
+  ctx.textAlign = align;
+  ctx.font = font('SemiBold', 18);
+  ctx.letterSpacing = '1px';
+  ctx.fillStyle = COLORS.muted;
+  ctx.fillText(str, x, y);
+  ctx.restore();
 }
 
 async function loadAvatar(url) {
@@ -62,6 +90,119 @@ async function loadAvatar(url) {
   } catch (err) {
     console.warn('[card] Не удалось загрузить аватар:', err.message);
     return null;
+  }
+}
+
+function drawBackground(ctx) {
+  roundRect(ctx, 0, 0, W, H, 30);
+  ctx.save();
+  ctx.clip();
+
+  const bg = ctx.createLinearGradient(0, 0, W * 0.4, H);
+  bg.addColorStop(0, COLORS.bgTop);
+  bg.addColorStop(1, COLORS.bgBottom);
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Мягкие цветные свечения: за аватаром и в правом нижнем углу
+  const glowA = ctx.createRadialGradient(130, 170, 0, 130, 170, 300);
+  glowA.addColorStop(0, 'rgba(63,124,255,0.22)');
+  glowA.addColorStop(1, 'rgba(63,124,255,0)');
+  ctx.fillStyle = glowA;
+  ctx.fillRect(0, 0, W, H);
+
+  const glowB = ctx.createRadialGradient(W, H, 0, W, H, 380);
+  glowB.addColorStop(0, 'rgba(53,208,255,0.10)');
+  glowB.addColorStop(1, 'rgba(53,208,255,0)');
+  ctx.fillStyle = glowB;
+  ctx.fillRect(0, 0, W, H);
+
+  // «Стекло»: лёгкий блик сверху
+  const sheen = ctx.createLinearGradient(0, 0, 0, H * 0.45);
+  sheen.addColorStop(0, 'rgba(255,255,255,0.045)');
+  sheen.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sheen;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.restore();
+
+  // Рамка и светлая верхняя кромка
+  roundRect(ctx, 0.5, 0.5, W - 1, H - 1, 30);
+  ctx.strokeStyle = COLORS.border;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  ctx.save();
+  roundRect(ctx, 0, 0, W, H, 30);
+  ctx.clip();
+  const edge = ctx.createLinearGradient(0, 0, W, 0);
+  edge.addColorStop(0, 'rgba(63,124,255,0)');
+  edge.addColorStop(0.5, 'rgba(120,170,255,0.45)');
+  edge.addColorStop(1, 'rgba(53,208,255,0)');
+  ctx.fillStyle = edge;
+  ctx.fillRect(0, 0, W, 2);
+  ctx.restore();
+}
+
+async function drawAvatar(ctx, url, cx, cy, r) {
+  // Кольцо с мягким свечением
+  ctx.save();
+  ctx.shadowColor = 'rgba(63,124,255,0.55)';
+  ctx.shadowBlur = 26;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + 10, 0, Math.PI * 2);
+  ctx.strokeStyle = accentGradient(ctx, cx - r, cx + r);
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.restore();
+
+  // Тёмный зазор между кольцом и аватаркой
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#0e1016';
+  ctx.fill();
+
+  const avatar = await loadAvatar(url);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.clip();
+  if (avatar) {
+    ctx.drawImage(avatar, cx - r, cy - r, r * 2, r * 2);
+  } else {
+    ctx.fillStyle = '#2a2e38';
+    ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  }
+  ctx.restore();
+}
+
+function drawTile(ctx, x, y, w, h, caption, value, { suffix, color } = {}) {
+  roundRect(ctx, x, y, w, h, 18);
+  ctx.fillStyle = COLORS.tile;
+  ctx.fill();
+  ctx.strokeStyle = COLORS.tileBorder;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  const PAD = 20;
+  label(ctx, caption, x + PAD, y + 29);
+
+  ctx.textAlign = 'left';
+  let suffixW = 0;
+  if (suffix) {
+    ctx.font = font('Bold', 20);
+    suffixW = ctx.measureText(suffix).width + 8;
+  }
+  const maxW = w - PAD * 2 - suffixW;
+  fitFont(ctx, 'ExtraBold', 36, 24, value, maxW);
+  const valueW = ctx.measureText(value).width;
+  ctx.fillStyle = typeof color === 'function' ? color(x + PAD, x + PAD + valueW) : color ?? COLORS.text;
+  ctx.fillText(value, x + PAD, y + 66);
+
+  if (suffix) {
+    ctx.font = font('Bold', 20);
+    ctx.fillStyle = COLORS.muted;
+    ctx.fillText(suffix, x + PAD + valueW + 8, y + 66);
   }
 }
 
@@ -81,169 +222,102 @@ async function renderRankCard(p) {
   const canvas = createCanvas(W * SCALE, H * SCALE);
   const ctx = canvas.getContext('2d');
   ctx.scale(SCALE, SCALE);
-
-  // --- Фон ---
-  roundRect(ctx, 0, 0, W, H, 28);
-  ctx.save();
-  ctx.clip();
-
-  const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, COLORS.bgTop);
-  bg.addColorStop(1, COLORS.bgBottom);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  // Мягкое свечение за аватаром
-  const glow = ctx.createRadialGradient(150, 150, 0, 150, 150, 260);
-  glow.addColorStop(0, 'rgba(63,124,255,0.20)');
-  glow.addColorStop(1, 'rgba(63,124,255,0)');
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, W, H);
-
-  // Точечная сетка справа — едва заметная фактура, плавно проявляется к краю
-  for (let x = 560; x < W; x += 18) {
-    const alpha = 0.05 * Math.min(1, (x - 560) / 260);
-    ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
-    for (let y = 14; y < H; y += 18) {
-      ctx.beginPath();
-      ctx.arc(x, y, 1.1, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  // Акцентная полоса слева
-  const stripe = ctx.createLinearGradient(0, 0, 0, H);
-  stripe.addColorStop(0, COLORS.accentA);
-  stripe.addColorStop(1, COLORS.accentB);
-  ctx.fillStyle = stripe;
-  ctx.fillRect(0, 0, 6, H);
-
-  ctx.restore();
-
-  // Тонкая рамка
-  roundRect(ctx, 0.5, 0.5, W - 1, H - 1, 28);
-  ctx.strokeStyle = COLORS.border;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // --- Аватар ---
-  const AX = 150;
-  const AY = 150;
-  const AR = 92;
-
-  ctx.beginPath();
-  ctx.arc(AX, AY, AR + 7, 0, Math.PI * 2);
-  ctx.strokeStyle = accentGradient(ctx, AX - AR, AX + AR);
-  ctx.lineWidth = 4;
-  ctx.stroke();
-
-  const avatar = await loadAvatar(p.avatarUrl);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(AX, AY, AR, 0, Math.PI * 2);
-  ctx.clip();
-  if (avatar) {
-    ctx.drawImage(avatar, AX - AR, AY - AR, AR * 2, AR * 2);
-  } else {
-    ctx.fillStyle = '#2a2e38';
-    ctx.fillRect(AX - AR, AY - AR, AR * 2, AR * 2);
-  }
-  ctx.restore();
-
-  // --- Правая часть ---
-  const LX = 290;
-  const RX = 950;
-
-  // Статы справа сверху: РАНГ и УРОВЕНЬ
   ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'right';
 
-  const drawStat = (rightX, label, value, highlight) => {
-    ctx.font = font('ExtraBold', 46);
-    ctx.fillStyle = highlight ? accentGradient(ctx, rightX - ctx.measureText(value).width, rightX) : COLORS.text;
-    ctx.fillText(value, rightX, 100);
-    const valueWidth = ctx.measureText(value).width;
-    ctx.font = font('SemiBold', 14);
-    ctx.fillStyle = COLORS.muted;
-    ctx.fillText(label, rightX, 50);
-    return Math.max(valueWidth, ctx.measureText(label).width);
-  };
+  drawBackground(ctx);
+  await drawAvatar(ctx, p.avatarUrl, 132, H / 2, 82);
 
-  const levelWidth = drawStat(RX, 'УРОВЕНЬ', String(p.level), true);
-  const rankRight = RX - levelWidth - 40;
-  const rankWidth = drawStat(rankRight, 'РАНГ', p.rank ? `#${p.rank}` : '—', false);
+  const LX = 270;
+  const RX = W - 40;
+  const CW = RX - LX;
 
-  // Разделитель между статами
-  ctx.fillStyle = 'rgba(255,255,255,0.08)';
-  ctx.fillRect(RX - levelWidth - 20, 42, 1, 62);
-
-  // Имя
-  const nameMax = rankRight - rankWidth - 30 - LX;
+  // --- Имя ---
   ctx.textAlign = 'left';
-  ctx.font = font('Bold', 38);
+  fitFont(ctx, 'Bold', 46, 30, p.displayName, CW);
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(fitText(ctx, p.displayName, nameMax), LX, 86);
+  ctx.fillText(fitText(ctx, p.displayName, CW), LX, 82);
 
-  ctx.font = font('Medium', 18);
+  ctx.font = font('Medium', 22);
   ctx.fillStyle = COLORS.muted;
-  ctx.fillText(fitText(ctx, `@${p.username}`, nameMax), LX, 116);
+  ctx.fillText(fitText(ctx, `@${p.username}`, CW), LX, 114);
 
-  // Прогресс
-  const BAR_Y = 196;
-  const BAR_H = 22;
-  const BAR_W = RX - LX;
+  // --- Плитки: ранг, уровень, общий опыт ---
+  const TY = 136;
+  const TH = 80;
+  const GAP = 12;
+  const TW = (CW - GAP * 2) / 3;
+
+  drawTile(ctx, LX, TY, TW, TH, 'РАНГ', p.rank ? `#${p.rank}` : '—', {
+    color: PODIUM[p.rank] ?? COLORS.text,
+  });
+  drawTile(ctx, LX + TW + GAP, TY, TW, TH, 'УРОВЕНЬ', String(p.level), {
+    color: (x0, x1) => accentGradient(ctx, x0, x1),
+  });
+  drawTile(ctx, LX + (TW + GAP) * 2, TY, TW, TH, 'ВСЕГО ОПЫТА', fmt(p.total), { suffix: 'XP' });
+
+  // --- Прогресс до следующего уровня ---
   const ratio = p.needed > 0 ? Math.min(1, p.current / p.needed) : 0;
+  const LABEL_Y = 252;
+  const BAR_Y = 266;
+  const BAR_H = 26;
 
-  ctx.font = font('SemiBold', 16);
-  ctx.fillStyle = COLORS.muted;
-  ctx.fillText('ПРОГРЕСС УРОВНЯ', LX, BAR_Y - 16);
+  label(ctx, `ДО УРОВНЯ ${p.level + 1}`, LX, LABEL_Y);
 
   ctx.textAlign = 'right';
   const neededStr = ` / ${fmt(p.needed)} XP`;
-  ctx.font = font('Medium', 18);
+  ctx.font = font('Medium', 21);
   ctx.fillStyle = COLORS.muted;
-  ctx.fillText(neededStr, RX, BAR_Y - 15);
+  ctx.fillText(neededStr, RX, LABEL_Y);
   const neededW = ctx.measureText(neededStr).width;
-  ctx.font = font('Bold', 18);
+  ctx.font = font('Bold', 21);
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(fmt(p.current), RX - neededW, BAR_Y - 15);
+  ctx.fillText(fmt(p.current), RX - neededW, LABEL_Y);
 
-  roundRect(ctx, LX, BAR_Y, BAR_W, BAR_H, BAR_H / 2);
+  roundRect(ctx, LX, BAR_Y, CW, BAR_H, BAR_H / 2);
   ctx.fillStyle = COLORS.track;
   ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
   if (ratio > 0) {
-    const fillW = Math.max(BAR_H, BAR_W * ratio);
+    const fillW = Math.max(BAR_H, CW * ratio);
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(63,124,255,0.55)';
+    ctx.shadowBlur = 14;
     roundRect(ctx, LX, BAR_Y, fillW, BAR_H, BAR_H / 2);
     ctx.fillStyle = accentGradient(ctx, LX, LX + fillW);
     ctx.fill();
+    ctx.restore();
 
-    // Лёгкий блик сверху полосы
-    roundRect(ctx, LX + 4, BAR_Y + 3, Math.max(0, fillW - 8), BAR_H / 2 - 3, (BAR_H / 2 - 3) / 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    // Блик сверху полосы
+    roundRect(ctx, LX + 5, BAR_Y + 3, Math.max(0, fillW - 10), BAR_H / 2 - 3, (BAR_H / 2 - 3) / 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.20)';
     ctx.fill();
   }
 
-  // Нижняя строка
-  const FOOT_Y = 256;
+  // --- Нижняя строка ---
+  const FOOT_Y = 322;
   ctx.textAlign = 'left';
-  const footItem = (x, label, value) => {
-    ctx.font = font('SemiBold', 14);
-    ctx.fillStyle = COLORS.faint;
-    ctx.fillText(label, x, FOOT_Y);
-    const lw = ctx.measureText(label).width;
-    ctx.font = font('Bold', 17);
-    ctx.fillStyle = COLORS.text;
-    ctx.fillText(value, x + lw + 10, FOOT_Y);
-    return lw + 10 + ctx.measureText(value).width;
-  };
-  const w1 = footItem(LX, 'ВСЕГО ОПЫТА', `${fmt(p.total)} XP`);
-  footItem(LX + w1 + 36, 'СООБЩЕНИЙ', fmt(p.messages));
+  ctx.font = font('Medium', 20);
+  ctx.fillStyle = COLORS.muted;
+  const msgLabel = 'Сообщений ';
+  ctx.fillText(msgLabel, LX, FOOT_Y);
+  const msgLabelW = ctx.measureText(msgLabel).width;
+  ctx.font = font('Bold', 20);
+  ctx.fillStyle = COLORS.text;
+  ctx.fillText(fmt(p.messages), LX + msgLabelW, FOOT_Y);
 
   ctx.textAlign = 'right';
-  ctx.font = font('Bold', 17);
+  const percent = `${Math.floor(ratio * 100)}%`;
+  ctx.font = font('Bold', 20);
   ctx.fillStyle = COLORS.text;
-  ctx.fillText(`${Math.floor(ratio * 100)}%`, RX, FOOT_Y);
+  ctx.fillText(percent, RX, FOOT_Y);
+  const percentW = ctx.measureText(percent).width;
+  ctx.font = font('Medium', 20);
+  ctx.fillStyle = COLORS.muted;
+  ctx.fillText(`Осталось ${fmt(Math.max(0, p.needed - p.current))} XP  ·  `, RX - percentW, FOOT_Y);
 
   return canvas.encode('png');
 }
