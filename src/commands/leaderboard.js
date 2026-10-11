@@ -7,11 +7,11 @@ const {
 } = require('discord.js');
 const { store } = require('../store');
 const { levelInfo } = require('../levels');
+const { formatCompact } = require('../format');
 
 const PAGE_SIZE = 10;
 const ACCENT = 0x3f7cff;
 const MEDALS = ['🥇', '🥈', '🥉'];
-const nf = new Intl.NumberFormat('ru-RU');
 
 async function resolveName(guild, id) {
   const member = await guild.members.fetch(id).catch(() => null);
@@ -38,7 +38,7 @@ async function buildPage(guild, viewerId, page) {
     const { level } = levelInfo(u.xp);
     const name = escape(names[i]);
     const nameStr = u.id === viewerId ? `__**${name}**__` : `**${name}**`;
-    return `${badge} ${nameStr}\n┗ Уровень **${level}** · ${nf.format(u.xp)} XP`;
+    return `${badge} ${nameStr}\n┗ Уровень **${level}** · ${formatCompact(u.xp)} XP`;
   });
 
   const embed = new EmbedBuilder()
@@ -50,7 +50,7 @@ async function buildPage(guild, viewerId, page) {
   const footer = [`Страница ${page + 1} из ${pages}`];
   if (viewerRank) {
     const viewer = store.getUser(viewerId);
-    footer.push(`Ваше место: #${viewerRank} · ${nf.format(viewer.xp)} XP`);
+    footer.push(`Ваше место: #${viewerRank} · ${formatCompact(viewer.xp)} XP`);
   }
   embed.setFooter({ text: footer.join('  •  ') });
 
