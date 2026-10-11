@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const { formatCompact } = require('./format');
 
 const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
 GlobalFonts.registerFromPath(path.join(FONT_DIR, 'Inter-Medium.ttf'), 'Inter Medium');
@@ -33,8 +34,7 @@ const COLORS = {
 // Места на пьедестале подсвечиваются
 const PODIUM = { 1: '#ffd25e', 2: '#d3dae8', 3: '#e8a06a' };
 
-const nf = new Intl.NumberFormat('ru-RU');
-const fmt = (n) => nf.format(n);
+const fmt = formatCompact;
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
