@@ -40,6 +40,8 @@ function buildPanel(notice) {
   const s = store.settings;
   const effMin = Math.round(s.xpMin * s.multiplier);
   const effMax = Math.round(s.xpMax * s.multiplier);
+  const frequency =
+    s.cooldown === 0 ? 'за каждое сообщение' : `не чаще чем раз в **${formatDuration(s.cooldown)}**`;
 
   const embed = new EmbedBuilder()
     .setColor(ACCENT)
@@ -51,7 +53,7 @@ function buildPanel(notice) {
       { name: 'Общий множитель', value: `\`${formatMultiplier(s.multiplier)}\``, inline: true },
       {
         name: 'Итого',
-        value: `Участник получает **${effMin}–${effMax} XP** не чаще чем раз в **${formatDuration(s.cooldown)}**.`,
+        value: `Участник получает **${effMin}–${effMax} XP** ${frequency}.`,
       },
     );
   if (notice) embed.setFooter({ text: notice });
@@ -103,11 +105,15 @@ function buildModal(kind) {
   }
 }
 
+const INTEGER_RE = /^-?\d+$/;
+const DECIMAL_RE = /^-?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+// Строгий разбор: Number() принимает пустую строку (как 0), «0x10», «1e3» и т.п.
 function parseNumber(raw, { integer }) {
-  const n = Number(String(raw).trim().replace(',', '.').replace(/^[x×х]|[x×х]$/gi, ''));
-  if (!Number.isFinite(n)) return null;
-  if (integer && !Number.isInteger(n)) return null;
-  return n;
+  let text = String(raw).trim().replace(',', '.');
+  if (!integer) text = text.replace(/^[x×х]|[x×х]$/gi, '').trim();
+  if (!(integer ? INTEGER_RE : DECIMAL_RE).test(text)) return null;
+  return Number(text);
 }
 
 // Возвращает либо { patch }, либо { error }
