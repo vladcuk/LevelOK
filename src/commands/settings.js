@@ -28,8 +28,9 @@ const LIMITS = {
   level: { min: 1, max: 1000 },
 };
 
-// Предел наград: select-меню удаления вмещает 25 пунктов, плюс запас по длине текста панели
 const MAX_REWARDS = 20;
+// Лимит Components V2 — 40 компонентов на сообщение; пункт награды занимает 3 (секция, текст, кнопка)
+const REWARDS_PER_PAGE = 5;
 
 // ───────────── форматирование ─────────────
 
@@ -57,10 +58,6 @@ function plural(n, one, few, many) {
   return many;
 }
 
-function xpRange(s) {
-  return `${s.xpMin} – ${s.xpMax} XP`;
-}
-
 function totalLine() {
   const s = store.settings;
   const effMin = Math.round(s.xpMin * s.multiplier);
@@ -72,7 +69,7 @@ function totalLine() {
 
 function rewardsSummary() {
   const count = store.rewardList().length;
-  if (count === 0) return 'не настроены';
+  if (count === 0) return 'Награды не настроены';
   const mode = store.rewards.stacking ? 'суммируются' : 'только высшая';
   return `${count} ${plural(count, 'награда', 'награды', 'наград')} · ${mode}`;
 }
@@ -89,13 +86,33 @@ function button(customId, label, style, emoji) {
   return b;
 }
 
-const backButton = () => button('settings:home', 'Назад', ButtonStyle.Secondary, '↩️');
+// Меню служит только для выбора категории; текущая отмечена, поэтому «Назад» не нужен
+function categoryMenu(active) {
+  return new StringSelectMenuBuilder()
+    .setCustomId('settings:cat')
+    .setPlaceholder('Категория настроек')
+    .addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setValue('xp')
+        .setLabel('Опыт')
+        .setDescription('Опыт за сообщение, интервал и множитель')
+        .setEmoji('✨')
+        .setDefault(active === 'xp'),
+      new StringSelectMenuOptionBuilder()
+        .setValue('rewards')
+        .setLabel('Роли награды')
+        .setDescription(rewardsSummary())
+        .setEmoji('🏆')
+        .setDefault(active === 'rewards'),
+    );
+}
 
-// Контейнер с заголовком; остальное дописывает конкретная страница
-function shell(title, description) {
+// Каркас любого экрана: заголовок, меню категорий, разделитель
+function frame(category, title, description) {
   return new ContainerBuilder()
     .setAccentColor(ACCENT)
     .addTextDisplayComponents(text(`## ${title}\n${description}`))
+    .addActionRowComponents(row(categoryMenu(category)))
     .addSeparatorComponents(divider());
 }
 
@@ -105,85 +122,61 @@ function view(container, notice) {
   return { components: [container], flags: MessageFlags.IsComponentsV2 };
 }
 
-// ───────────── страницы ─────────────
+// ───────────── категория «Опыт» ─────────────
 
-const PAGES = {
+const ITEMS = {
   xp: {
     emoji: '✨',
     title: 'Опыт за сообщение',
-    hint: 'Каждое засчитанное сообщение приносит случайное количество опыта — от минимума до максимума.',
-    current: (s) => `\`${xpRange(s)}\``,
-    option: (s) => xpRange(s),
+    hint: 'случайно от минимума до максимума',
+    value: (s) => `${s.xpMin} – ${s.xpMax} XP`,
   },
   cooldown: {
     emoji: '⏱️',
-    title: 'Интервал начисления',
-    hint: 'Как часто один участник может получать опыт. Сообщения внутри интервала не засчитываются.',
-    current: (s) => `\`${formatDuration(s.cooldown)}\``,
-    option: (s) => formatDuration(s.cooldown),
+    title: 'Интервал',
+    hint: 'как часто один участник получает опыт',
+    value: (s) => formatDuration(s.cooldown),
   },
   multiplier: {
     emoji: '📈',
     title: 'Общий множитель',
-    hint: `Умножает опыт за каждое сообщение. Допустимо от ×${LIMITS.multiplier.min} до ×${LIMITS.multiplier.max}.`,
-    current: (s) => `\`${formatMultiplier(s.multiplier)}\``,
-    option: (s) => formatMultiplier(s.multiplier),
+    hint: `умножает весь опыт, от ×${LIMITS.multiplier.min} до ×${LIMITS.multiplier.max}`,
+    value: (s) => formatMultiplier(s.multiplier),
   },
 };
 
-function homeView(notice) {
+function xpView(notice) {
   const s = store.settings;
+  const container = frame('xp', '✨ Опыт', 'Сколько опыта и как часто участники получают его за сообщения.');
 
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId('settings:menu')
-    .setPlaceholder('Выберите, что настроить…')
-    .addOptions(
-      ...Object.entries(PAGES).map(([kind, p]) =>
-        new StringSelectMenuOptionBuilder()
-          .setValue(kind)
-          .setLabel(p.title)
-          .setDescription(p.option(s))
-          .setEmoji(p.emoji),
-      ),
-      new StringSelectMenuOptionBuilder()
-        .setValue('rewards')
-        .setLabel('Роли награды')
-        .setDescription(rewardsSummary())
-        .setEmoji('🏆'),
+  // У каждого пункта своя кнопка
+  for (const [kind, item] of Object.entries(ITEMS)) {
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(
+            `**${item.emoji} ${item.title}** · \`${item.value(s)}\`\n` +
+              `-# ${item.hint} · по умолчанию ${item.value(DEFAULT_SETTINGS)}`,
+          ),
+        )
+        .setButtonAccessory(button(`settings:edit:${kind}`, 'Изменить', ButtonStyle.Primary, '✏️')),
     );
+  }
 
-  const container = shell('⚙️ Общие настройки', 'Параметры системы опыта и наград за уровни.')
-    .addTextDisplayComponents(
-      text(
-        [
-          ...Object.values(PAGES).map((p) => `${p.emoji} **${p.title}** · ${p.current(s)}`),
-          `🏆 **Роли награды** · ${rewardsSummary()}`,
-        ].join('\n'),
-      ),
-    )
+  container
     .addSeparatorComponents(divider())
     .addTextDisplayComponents(text(totalLine()))
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(row(menu))
-    .addActionRowComponents(row(button('settings:reset', 'Сбросить параметры опыта', ButtonStyle.Secondary, '🔄')));
+    .addActionRowComponents(row(button('settings:reset', 'Сбросить к умолчаниям', ButtonStyle.Secondary, '🔄')));
 
   return view(container, notice);
 }
 
-function pageView(kind, notice) {
-  const p = PAGES[kind];
-  const container = shell(`${p.emoji} ${p.title}`, p.hint)
-    .addSectionComponents(
-      new SectionBuilder()
-        .addTextDisplayComponents(text(`**Сейчас**\n${p.current(store.settings)}`))
-        .setButtonAccessory(button(`settings:edit:${kind}`, 'Изменить', ButtonStyle.Primary, '✏️')),
-    )
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(totalLine()))
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(row(backButton()));
+// ───────────── категория «Роли награды» ─────────────
 
-  return view(container, notice);
+// На какой странице списка находится награда за уровень
+function pageOf(level) {
+  const idx = store.rewardList().findIndex((r) => r.level === level);
+  return idx === -1 ? 0 : Math.floor(idx / REWARDS_PER_PAGE);
 }
 
 // Роль может быть удалена или недоступна боту (ниже по иерархии / нет «Управления ролями»)
@@ -193,23 +186,40 @@ function describeReward(guild, { level, roleId }) {
   return `**Уровень ${level}** → <@&${roleId}>${role.editable ? '' : ' ⚠️'}`;
 }
 
-async function rewardsView(guild, notice) {
+async function rewardsView(guild, page = 0, notice) {
   await guild.members.fetchMe().catch(() => null); // для проверки role.editable
   const list = store.rewardList();
   const stacking = store.rewards.stacking;
+  const pages = Math.max(1, Math.ceil(list.length / REWARDS_PER_PAGE));
+  const current = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const slice = list.slice(current * REWARDS_PER_PAGE, (current + 1) * REWARDS_PER_PAGE);
   const broken = list.some(({ roleId }) => !guild.roles.cache.get(roleId)?.editable);
 
-  const container = shell(
-    '🏆 Роли награды',
-    'Бот сам выдаёт роль, когда участник достигает указанного уровня.',
-  )
-    .addTextDisplayComponents(
-      text(list.length ? list.map((r) => describeReward(guild, r)).join('\n') : '*Награды ещё не настроены.*'),
-    );
+  const container = frame('rewards', '🏆 Роли награды', 'Бот сам выдаёт роль, когда участник достигает уровня.');
 
+  if (slice.length === 0) {
+    container.addTextDisplayComponents(text('*Наград пока нет — нажмите «Добавить роль».*'));
+  }
+  // У каждой награды своя кнопка
+  for (const reward of slice) {
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(describeReward(guild, reward)))
+        .setButtonAccessory(button(`settings:rw-edit:${reward.level}`, 'Изменить', ButtonStyle.Secondary, '✏️')),
+    );
+  }
   if (broken) {
     container.addTextDisplayComponents(
       text('-# ⚠️ Бот не может выдать роль: нужно право «Управление ролями» и роль бота выше награды в списке ролей сервера.'),
+    );
+  }
+
+  const controls = [button(`settings:rw-add`, 'Добавить роль', ButtonStyle.Success, '➕')];
+  if (pages > 1) {
+    controls.push(
+      button(`settings:rw-page:${current - 1}`, '◀', ButtonStyle.Secondary).setDisabled(current === 0),
+      button('settings:rw-noop', `${current + 1}/${pages}`, ButtonStyle.Secondary).setDisabled(true),
+      button(`settings:rw-page:${current + 1}`, '▶', ButtonStyle.Secondary).setDisabled(current === pages - 1),
     );
   }
 
@@ -220,62 +230,43 @@ async function rewardsView(guild, notice) {
         .addTextDisplayComponents(
           text(
             stacking
-              ? '🔁 **Суммирование ролей** · включено\nУчастник сохраняет роли за все достигнутые уровни.'
-              : '🔁 **Суммирование ролей** · выключено\nУ участника остаётся только роль за самый высокий достигнутый уровень.',
+              ? '🔁 **Суммирование ролей** · включено\n-# Участник сохраняет роли за все достигнутые уровни.'
+              : '🔁 **Суммирование ролей** · выключено\n-# У участника остаётся только роль за самый высокий достигнутый уровень.',
           ),
         )
         .setButtonAccessory(
           stacking
-            ? button('settings:rw-stack', 'Выключить', ButtonStyle.Secondary)
-            : button('settings:rw-stack', 'Включить', ButtonStyle.Success),
+            ? button(`settings:rw-stack:${current}`, 'Выключить', ButtonStyle.Secondary)
+            : button(`settings:rw-stack:${current}`, 'Включить', ButtonStyle.Success),
         ),
     )
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(
-      row(button('settings:rw-add', 'Добавить роль', ButtonStyle.Primary, '➕'), backButton()),
-    );
-
-  if (list.length) {
-    container.addActionRowComponents(
-      row(
-        new StringSelectMenuBuilder()
-          .setCustomId('settings:rw-del')
-          .setPlaceholder('Удалить награду…')
-          .addOptions(
-            // В select-меню максимум 25 пунктов (на случай ручной правки db.json)
-            list.slice(0, 25).map(({ level, roleId }) =>
-              new StringSelectMenuOptionBuilder()
-                .setValue(String(level))
-                .setLabel(`Уровень ${level}`)
-                .setDescription(`Роль: ${guild.roles.cache.get(roleId)?.name ?? 'удалена'}`.slice(0, 100))
-                .setEmoji('🗑️'),
-            ),
-          ),
-      ),
-    );
-  }
+    .addActionRowComponents(row(...controls));
 
   return view(container, notice);
 }
 
-function pickRoleView(level, notice) {
-  const current = store.rewards.roles[level];
-  const container = shell(
+// Выбор роли для уровня: и для новой награды, и для существующей (там же её можно удалить)
+function pickRoleView(guild, level, notice) {
+  const existing = store.rewards.roles[level];
+  const container = frame(
+    'rewards',
     `🏆 Роль за ${level} уровень`,
     `Выберите роль, которая будет выдаваться при достижении **${level}** уровня.` +
-      (current ? `\nСейчас: <@&${current}> — она будет заменена.` : ''),
-  )
-    .addActionRowComponents(
-      row(
-        new RoleSelectMenuBuilder()
-          .setCustomId(`settings:rw-pick:${level}`)
-          .setPlaceholder('Выберите роль…')
-          .setMinValues(1)
-          .setMaxValues(1),
-      ),
-    )
-    .addActionRowComponents(row(button('settings:rewards', 'Отмена', ButtonStyle.Secondary, '✖️')));
+      (existing ? `\nСейчас: <@&${existing}>` : ''),
+  );
 
+  const select = new RoleSelectMenuBuilder()
+    .setCustomId(`settings:rw-pick:${level}`)
+    .setPlaceholder('Выберите роль…')
+    .setMinValues(1)
+    .setMaxValues(1);
+  if (existing && guild.roles.cache.has(existing)) select.setDefaultRoles(existing);
+
+  const actions = [];
+  if (existing) actions.push(button(`settings:rw-del:${level}`, 'Удалить награду', ButtonStyle.Danger, '🗑️'));
+  actions.push(button(`settings:rw-page:${pageOf(level)}`, 'Отмена', ButtonStyle.Secondary, '✖️'));
+
+  container.addActionRowComponents(row(select)).addActionRowComponents(row(...actions));
   return view(container, notice);
 }
 
@@ -379,6 +370,9 @@ function rewardsFull(level) {
   return store.rewardList().length >= MAX_REWARDS && !(level in store.rewards.roles);
 }
 
+const validLevel = (level) =>
+  Number.isInteger(level) && level >= LIMITS.level.min && level <= LIMITS.level.max;
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('settings')
@@ -387,7 +381,7 @@ module.exports = {
 
   async execute(interaction) {
     if (!isAdmin(interaction)) return interaction.reply(NO_ACCESS);
-    await interaction.reply({ ...homeView(), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
+    await interaction.reply({ ...xpView(), flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral });
   },
 
   // Кнопки и меню: customId = settings:<действие>[:<аргумент>]
@@ -397,13 +391,11 @@ module.exports = {
     const { guild } = interaction;
 
     switch (action) {
-      case 'menu': {
-        const kind = interaction.values[0];
-        if (kind === 'rewards') return interaction.update(await rewardsView(guild));
-        return interaction.update(PAGES[kind] ? pageView(kind) : homeView());
-      }
-      case 'home':
-        return interaction.update(homeView());
+      // Меню категорий
+      case 'cat':
+        return interaction.update(interaction.values[0] === 'rewards' ? await rewardsView(guild) : xpView());
+
+      // Категория «Опыт»
       case 'edit': {
         const modal = buildModal(arg);
         if (modal) await interaction.showModal(modal);
@@ -411,10 +403,13 @@ module.exports = {
       }
       case 'reset':
         store.updateSettings({ ...DEFAULT_SETTINGS });
-        return interaction.update(homeView('Параметры опыта сброшены по умолчанию. Награды не затронуты.'));
+        return interaction.update(xpView('🔄 Параметры опыта сброшены по умолчанию.'));
 
-      case 'rewards':
-        return interaction.update(await rewardsView(guild));
+      // Категория «Роли награды»
+      case 'rw-page':
+        return interaction.update(await rewardsView(guild, Number(arg)));
+      case 'rw-noop':
+        return interaction.deferUpdate();
       case 'rw-add':
         return interaction.showModal(buildModal('level'));
       case 'rw-stack': {
@@ -423,39 +418,46 @@ module.exports = {
         return interaction.update(
           await rewardsView(
             guild,
+            Number(arg),
             `✅ Суммирование ${enabled ? 'включено' : 'выключено'}. Роли обновятся, когда участник в следующий раз получит опыт.`,
           ),
         );
       }
+      case 'rw-edit': {
+        const level = Number(arg);
+        if (!(level in store.rewards.roles)) return interaction.update(await rewardsView(guild));
+        return interaction.update(pickRoleView(guild, level));
+      }
       case 'rw-del': {
-        const level = Number(interaction.values[0]);
+        const level = Number(arg);
+        const page = pageOf(level);
         store.removeReward(level);
         return interaction.update(
-          await rewardsView(guild, `🗑️ Награда за ${level} уровень удалена. Уже выданные роли остаются у участников.`),
+          await rewardsView(guild, page, `🗑️ Награда за ${level} уровень удалена. Уже выданные роли остаются у участников.`),
         );
       }
       case 'rw-pick': {
         const level = Number(arg);
-        if (!Number.isInteger(level) || level < LIMITS.level.min || level > LIMITS.level.max) {
-          return interaction.update(await rewardsView(guild));
-        }
+        if (!validLevel(level)) return interaction.update(await rewardsView(guild));
         if (rewardsFull(level)) {
-          return interaction.update(await rewardsView(guild, `❌ Можно настроить не более ${MAX_REWARDS} наград.`));
+          return interaction.update(await rewardsView(guild, 0, `❌ Можно настроить не более ${MAX_REWARDS} наград.`));
         }
         const role = guild.roles.cache.get(interaction.values[0]);
         if (!role || role.id === guild.id) {
-          return interaction.update(pickRoleView(level, '❌ Эту роль выбрать нельзя. Выберите другую.'));
+          return interaction.update(pickRoleView(guild, level, '❌ Эту роль выбрать нельзя. Выберите другую.'));
         }
         if (role.managed) {
           return interaction.update(
-            pickRoleView(level, '❌ Эта роль управляется интеграцией или ботом — выдать её нельзя. Выберите другую.'),
+            pickRoleView(guild, level, '❌ Эта роль управляется интеграцией или ботом — выдать её нельзя. Выберите другую.'),
           );
         }
         store.setReward(level, role.id);
-        return interaction.update(await rewardsView(guild, `✅ Награда за ${level} уровень сохранена: ${role.name}.`));
+        return interaction.update(
+          await rewardsView(guild, pageOf(level), `✅ Награда за ${level} уровень сохранена: ${role.name}.`),
+        );
       }
       default:
-        // Кнопки старой панели (до перехода на Components V2)
+        // Кнопки старых панелей (до перехода на Components V2 и до смены раскладки)
         return interaction.reply(ephemeral('Эта панель устарела — откройте /settings заново.'));
     }
   },
@@ -468,10 +470,10 @@ module.exports = {
 
     if (kind === 'level') {
       if (rewardsFull(level)) return interaction.reply(ephemeral(`❌ Можно настроить не более ${MAX_REWARDS} наград.`));
-      return interaction.update(pickRoleView(level));
+      return interaction.update(pickRoleView(interaction.guild, level));
     }
 
     store.updateSettings(patch);
-    await interaction.update(pageView(kind, '✅ Сохранено.'));
+    await interaction.update(xpView('✅ Сохранено.'));
   },
 };
