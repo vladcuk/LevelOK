@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, Events, MessageFlags } = require('discord.js');
 const { store } = require('./store');
 const { levelInfo, randomXp } = require('./levels');
+const { applyRewards } = require('./rewards');
 
 const commands = [require('./commands/rank'), require('./commands/leaderboard'), require('./commands/settings')];
 const byName = new Map(commands.map((c) => [c.data.name, c]));
@@ -60,11 +61,18 @@ client.on(Events.MessageCreate, async (message) => {
   store.setUser(message.author.id, user);
 
   const after = levelInfo(user.xp).level;
+
+  // Синхронизируем и без повышения уровня: так роли подтянутся, если награду
+  // настроили уже после того, как участник набрал нужный уровень.
+  const granted = await applyRewards(message.member, after);
+
   if (after > before) {
+    let content = `🎉 ${message.author}, поздравляем! Вы достигли **${after}** уровня.`;
+    if (granted.length) content += `\n🎁 Награда: ${granted.map((id) => `<@&${id}>`).join(' ')}`;
     message.channel
       .send({
-        content: `🎉 ${message.author}, поздравляем! Вы достигли **${after}** уровня.`,
-        allowedMentions: { users: [message.author.id] },
+        content,
+        allowedMentions: { users: [message.author.id] }, // роли в сообщении не пингуются
       })
       .catch(() => {});
   }
@@ -76,10 +84,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
       await byName.get(interaction.commandName)?.execute(interaction);
-    } else if (interaction.isButton()) {
+    } else if (interaction.isMessageComponent()) {
       const [prefix] = interaction.customId.split(':');
-      if (prefix === 'lb') await byName.get('leaderboard').handleButton(interaction);
-      if (prefix === 'settings') await byName.get('settings').handleButton(interaction);
+      if (prefix === 'lb' && interaction.isButton()) await byName.get('leaderboard').handleButton(interaction);
+      if (prefix === 'settings') await byName.get('settings').handleComponent(interaction);
     } else if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('settings-modal:')) await byName.get('settings').handleModal(interaction);
     }

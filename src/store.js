@@ -11,11 +11,19 @@ const DEFAULT_SETTINGS = {
   multiplier: 1,
 };
 
+// Роли-награды за уровни. `roles`: { "<уровень>": "<id роли>" }.
+// stacking = true — участник хранит роли за все достигнутые уровни,
+// false — только роль за самый высокий достигнутый уровень.
+const DEFAULT_REWARDS = {
+  stacking: true,
+  roles: {},
+};
+
 // Простое JSON-хранилище: бот работает на одном сервере, этого хватает с запасом.
 // Запись на диск отложенная (debounce) и атомарная (через временный файл).
 class Store {
   constructor() {
-    this.data = { settings: { ...DEFAULT_SETTINGS }, users: {} };
+    this.data = { settings: { ...DEFAULT_SETTINGS }, rewards: { ...DEFAULT_REWARDS, roles: {} }, users: {} };
     this.saveTimer = null;
     this.load();
   }
@@ -25,6 +33,10 @@ class Store {
     try {
       const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       this.data.settings = { ...DEFAULT_SETTINGS, ...raw.settings };
+      this.data.rewards = {
+        stacking: raw.rewards?.stacking ?? DEFAULT_REWARDS.stacking,
+        roles: { ...raw.rewards?.roles },
+      };
       this.data.users = raw.users ?? {};
     } catch (err) {
       console.error('[store] Не удалось прочитать db.json, начинаю с пустой базы:', err);
@@ -56,6 +68,32 @@ class Store {
 
   updateSettings(patch) {
     Object.assign(this.data.settings, patch);
+    this.scheduleSave();
+  }
+
+  get rewards() {
+    return this.data.rewards;
+  }
+
+  // Награды, отсортированные по уровню: [{ level, roleId }]
+  rewardList() {
+    return Object.entries(this.data.rewards.roles)
+      .map(([level, roleId]) => ({ level: Number(level), roleId }))
+      .sort((a, b) => a.level - b.level);
+  }
+
+  setReward(level, roleId) {
+    this.data.rewards.roles[level] = roleId;
+    this.scheduleSave();
+  }
+
+  removeReward(level) {
+    delete this.data.rewards.roles[level];
+    this.scheduleSave();
+  }
+
+  setStacking(enabled) {
+    this.data.rewards.stacking = Boolean(enabled);
     this.scheduleSave();
   }
 
