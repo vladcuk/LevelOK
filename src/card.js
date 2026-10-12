@@ -1,6 +1,7 @@
 const path = require('node:path');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { formatCompact } = require('./format');
+const { rgba, mix } = require('./color');
 
 const FONT_DIR = path.join(__dirname, '..', 'assets', 'fonts');
 GlobalFonts.registerFromPath(path.join(FONT_DIR, 'Inter-Medium.ttf'), 'Inter Medium');
@@ -18,18 +19,38 @@ const W = 900;
 const H = 340;
 const SCALE = 2; // рисуем в 2x для чёткости на любых экранах
 
-const COLORS = {
-  bgTop: '#151822',
-  bgBottom: '#0b0c11',
-  border: 'rgba(255,255,255,0.08)',
-  text: '#f4f6fb',
-  muted: '#9aa1b2',
-  track: '#1e212b',
-  tile: 'rgba(255,255,255,0.045)',
-  tileBorder: 'rgba(255,255,255,0.07)',
-  accentA: '#3f7cff',
-  accentB: '#35d0ff',
+const DEFAULT_STYLE = {
+  accent: '#3f7cff',
+  accent2: '#35d0ff',
+  background: '#151822',
+  image: null,
+  dim: 55,
 };
+
+// Палитра карточки из настроек оформления (см. /settings → «Другое»)
+function makeTheme(style = {}) {
+  const s = { ...DEFAULT_STYLE, ...style };
+  const image = s.image ?? null;
+  return {
+    accentA: s.accent,
+    accentB: s.accent2 ?? mix(s.accent, '#ffffff', 0.35),
+    bgTop: s.background,
+    bgBottom: mix(s.background, '#000000', 0.45),
+    gap: mix(s.background, '#000000', 0.35),
+    image,
+    dim: Math.min(Math.max(Number(s.dim) || 0, 0), 90) / 100,
+    border: 'rgba(255,255,255,0.08)',
+    text: '#f4f6fb',
+    // На картинке подписи светлее и плитки темнее — иначе текст теряется
+    muted: image ? '#c3c8d4' : '#9aa1b2',
+    track: image ? 'rgba(8,10,16,0.6)' : mix(s.background, '#ffffff', 0.06),
+    tile: image ? 'rgba(8,10,16,0.45)' : 'rgba(255,255,255,0.045)',
+    tileBorder: image ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.07)',
+  };
+}
+
+// Текущая палитра на время отрисовки одной карточки (рендер синхронный после загрузки аватара)
+let COLORS = makeTheme();
 
 // Места на пьедестале подсвечиваются
 const PODIUM = { 1: '#ffd25e', 2: '#d3dae8', 3: '#e8a06a' };
@@ -98,22 +119,32 @@ function drawBackground(ctx) {
   ctx.save();
   ctx.clip();
 
-  const bg = ctx.createLinearGradient(0, 0, W * 0.4, H);
-  bg.addColorStop(0, COLORS.bgTop);
-  bg.addColorStop(1, COLORS.bgBottom);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
+  if (COLORS.image) {
+    // Картинка уже обрезана под карточку; затемняем цветом фона, чтобы читался текст
+    ctx.drawImage(COLORS.image, 0, 0, W, H);
+    const shade = ctx.createLinearGradient(0, 0, W, 0);
+    shade.addColorStop(0, rgba(COLORS.bgBottom, Math.min(1, COLORS.dim + 0.1)));
+    shade.addColorStop(1, rgba(COLORS.bgBottom, COLORS.dim));
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, 0, W, H);
+  } else {
+    const bg = ctx.createLinearGradient(0, 0, W * 0.4, H);
+    bg.addColorStop(0, COLORS.bgTop);
+    bg.addColorStop(1, COLORS.bgBottom);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   // Мягкие цветные свечения: за аватаром и в правом нижнем углу
   const glowA = ctx.createRadialGradient(130, 170, 0, 130, 170, 300);
-  glowA.addColorStop(0, 'rgba(63,124,255,0.22)');
-  glowA.addColorStop(1, 'rgba(63,124,255,0)');
+  glowA.addColorStop(0, rgba(COLORS.accentA, 0.22));
+  glowA.addColorStop(1, rgba(COLORS.accentA, 0));
   ctx.fillStyle = glowA;
   ctx.fillRect(0, 0, W, H);
 
   const glowB = ctx.createRadialGradient(W, H, 0, W, H, 380);
-  glowB.addColorStop(0, 'rgba(53,208,255,0.10)');
-  glowB.addColorStop(1, 'rgba(53,208,255,0)');
+  glowB.addColorStop(0, rgba(COLORS.accentB, 0.1));
+  glowB.addColorStop(1, rgba(COLORS.accentB, 0));
   ctx.fillStyle = glowB;
   ctx.fillRect(0, 0, W, H);
 
@@ -136,18 +167,18 @@ function drawBackground(ctx) {
   roundRect(ctx, 0, 0, W, H, 30);
   ctx.clip();
   const edge = ctx.createLinearGradient(0, 0, W, 0);
-  edge.addColorStop(0, 'rgba(63,124,255,0)');
-  edge.addColorStop(0.5, 'rgba(120,170,255,0.45)');
-  edge.addColorStop(1, 'rgba(53,208,255,0)');
+  edge.addColorStop(0, rgba(COLORS.accentA, 0));
+  edge.addColorStop(0.5, rgba(mix(COLORS.accentA, '#ffffff', 0.35), 0.45));
+  edge.addColorStop(1, rgba(COLORS.accentB, 0));
   ctx.fillStyle = edge;
   ctx.fillRect(0, 0, W, 2);
   ctx.restore();
 }
 
-async function drawAvatar(ctx, url, cx, cy, r) {
+function drawAvatar(ctx, avatar, cx, cy, r) {
   // Кольцо с мягким свечением
   ctx.save();
-  ctx.shadowColor = 'rgba(63,124,255,0.55)';
+  ctx.shadowColor = rgba(COLORS.accentA, 0.55);
   ctx.shadowBlur = 26;
   ctx.beginPath();
   ctx.arc(cx, cy, r + 10, 0, Math.PI * 2);
@@ -159,10 +190,9 @@ async function drawAvatar(ctx, url, cx, cy, r) {
   // Тёмный зазор между кольцом и аватаркой
   ctx.beginPath();
   ctx.arc(cx, cy, r + 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#0e1016';
+  ctx.fillStyle = COLORS.gap;
   ctx.fill();
 
-  const avatar = await loadAvatar(url);
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -217,21 +247,33 @@ function drawTile(ctx, x, y, w, h, caption, value, { suffix, color } = {}) {
  * @param {number} p.needed   опыт, нужный для следующего уровня
  * @param {number} p.total    общий опыт
  * @param {number} p.messages
+ * @param {object} [style] оформление: { accent, accent2, background, image, dim }
  */
-async function renderRankCard(p) {
+async function renderRankCard(p, style) {
+  // Аватар грузим заранее: дальше отрисовка синхронная, и общая палитра не перепутается
+  // между карточками, которые рендерятся одновременно.
+  const avatar = await loadAvatar(p.avatarUrl);
+  COLORS = makeTheme(style);
+
   const canvas = createCanvas(W * SCALE, H * SCALE);
   const ctx = canvas.getContext('2d');
   ctx.scale(SCALE, SCALE);
   ctx.textBaseline = 'alphabetic';
 
   drawBackground(ctx);
-  await drawAvatar(ctx, p.avatarUrl, 132, H / 2, 82);
+  drawAvatar(ctx, avatar, 132, H / 2, 82);
 
   const LX = 270;
   const RX = W - 40;
   const CW = RX - LX;
 
   // --- Имя ---
+  ctx.save();
+  if (COLORS.image) {
+    // На картинке имя без подложки — лёгкая тень отделяет его от фона
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur = 10;
+  }
   ctx.textAlign = 'left';
   fitFont(ctx, 'Bold', 46, 30, p.displayName, CW);
   ctx.fillStyle = COLORS.text;
@@ -240,6 +282,7 @@ async function renderRankCard(p) {
   ctx.font = font('Medium', 22);
   ctx.fillStyle = COLORS.muted;
   ctx.fillText(fitText(ctx, `@${p.username}`, CW), LX, 114);
+  ctx.restore();
 
   // --- Плитки: ранг, уровень, общий опыт ---
   const TY = 136;
@@ -284,7 +327,7 @@ async function renderRankCard(p) {
     const fillW = Math.max(BAR_H, CW * ratio);
 
     ctx.save();
-    ctx.shadowColor = 'rgba(63,124,255,0.55)';
+    ctx.shadowColor = rgba(COLORS.accentA, 0.55);
     ctx.shadowBlur = 14;
     roundRect(ctx, LX, BAR_Y, fillW, BAR_H, BAR_H / 2);
     ctx.fillStyle = accentGradient(ctx, LX, LX + fillW);
@@ -319,7 +362,8 @@ async function renderRankCard(p) {
   ctx.fillStyle = COLORS.muted;
   ctx.fillText(`Осталось ${fmt(Math.max(0, p.needed - p.current))} XP  ·  `, RX - percentW, FOOT_Y);
 
+  // encode асинхронный, но всё нарисовано — палитру можно отдавать следующей карточке
   return canvas.encode('png');
 }
 
-module.exports = { renderRankCard };
+module.exports = { renderRankCard, CARD_WIDTH: W, CARD_HEIGHT: H, CARD_SCALE: SCALE };

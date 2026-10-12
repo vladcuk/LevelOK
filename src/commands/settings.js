@@ -8,6 +8,12 @@ const {
   SeparatorBuilder,
   SeparatorSpacingSize,
   TextDisplayBuilder,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  LabelBuilder,
+  FileUploadBuilder,
+  AttachmentBuilder,
+  GatewayIntentBits,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   RoleSelectMenuBuilder,
@@ -19,7 +25,12 @@ const {
   PermissionFlagsBits,
   MessageFlags,
 } = require('discord.js');
-const { store, DEFAULT_SETTINGS } = require('../store');
+const { store, DEFAULT_SETTINGS, DEFAULT_LEVEL_UP, DEFAULT_CARD } = require('../store');
+const { parseHex, luminance } = require('../color');
+const { setBackground, removeBackground, MAX_BYTES: MAX_BACKGROUND_BYTES } = require('../background');
+const { renderUserCard } = require('../rankcard');
+const { syncTopRoles } = require('../toproles');
+const { PLACEHOLDERS, MAX_LENGTH: LEVEL_UP_MAX_LENGTH, renderLevelUp } = require('../levelup');
 const { parseDuration, formatDuration: formatShortDuration } = require('../duration');
 
 const ACCENT = 0x3f7cff;
@@ -29,6 +40,8 @@ const LIMITS = {
   cooldown: { min: 0, max: 86400 },
   multiplier: { min: 0.1, max: 10 },
   level: { min: 1, max: 1000 },
+  top: { min: 1, max: 100 },
+  dim: { min: 0, max: 90 },
 };
 
 const MAX_REWARDS = 20;
@@ -39,6 +52,10 @@ const REWARDS_PER_PAGE = 5;
 const MAX_MULTIPLIERS = 20;
 const MULTIPLIERS_PER_PAGE = 5;
 const MULTIPLIER_TYPES = { c: 'channel', r: 'role' };
+
+// Роли за место в топе — тоже по 3 компонента на пункт
+const MAX_TOP_ROLES = 10;
+const TOP_ROLES_PER_PAGE = 5;
 // Каналы, на которые можно навесить множитель (категория действует на все свои каналы)
 const MULTIPLIER_CHANNEL_TYPES = [
   ChannelType.GuildText,
@@ -134,6 +151,18 @@ function categoryMenu(active) {
         .setDescription(multipliersSummary())
         .setEmoji('⚡')
         .setDefault(active === 'multipliers'),
+      new StringSelectMenuOptionBuilder()
+        .setValue('levelup')
+        .setLabel('Повышение уровня')
+        .setDescription(store.levelUp.enabled ? 'Сообщение включено' : 'Сообщение выключено')
+        .setEmoji('🎉')
+        .setDefault(active === 'levelup'),
+      new StringSelectMenuOptionBuilder()
+        .setValue('other')
+        .setLabel('Другое')
+        .setDescription('Ранг-карта, обнуление опыта, роли за топ')
+        .setEmoji('🧩')
+        .setDefault(active === 'other'),
     );
 }
 
@@ -146,10 +175,11 @@ function frame(category, title, description) {
     .addSeparatorComponents(divider());
 }
 
-// Components V2 не сочетаются с content/embeds, поэтому «футер» — это мелкий текст внизу
-function view(container, notice) {
+// Components V2 не сочетаются с content/embeds, поэтому «футер» — это мелкий текст внизу.
+// attachments: [] убирает картинку предпросмотра, когда уходим с экрана ранг-карты.
+function view(container, notice, files = []) {
   if (notice) container.addTextDisplayComponents(text(`-# ${notice}`));
-  return { components: [container], flags: MessageFlags.IsComponentsV2 };
+  return { components: [container], flags: MessageFlags.IsComponentsV2, files, attachments: [] };
 }
 
 // ───────────── категория «Опыт» ─────────────
@@ -175,6 +205,22 @@ const ITEMS = {
   },
 };
 
+// Где начисляется опыт: ветки обычных каналов и посты форумов
+const XP_TOGGLES = {
+  threads: {
+    field: 'xpInThreads',
+    emoji: '🧵',
+    title: 'Опыт в ветках',
+    hint: 'сообщения в ветках текстовых каналов',
+  },
+  forums: {
+    field: 'xpInForums',
+    emoji: '🗂️',
+    title: 'Опыт в форумах',
+    hint: 'сообщения в постах форумов и медиаканалов',
+  },
+};
+
 function xpView(notice) {
   const s = store.settings;
   const container = frame('xp', '✨ Опыт', 'Сколько опыта и как часто участники получают его за сообщения.');
@@ -190,6 +236,20 @@ function xpView(notice) {
           ),
         )
         .setButtonAccessory(button(`settings:edit:${kind}`, 'Изменить', ButtonStyle.Primary, '✏️')),
+    );
+  }
+
+  container.addSeparatorComponents(divider());
+  for (const [key, toggle] of Object.entries(XP_TOGGLES)) {
+    const on = s[toggle.field] !== false;
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(`**${toggle.emoji} ${toggle.title}** · ${on ? 'начисляется' : 'не начисляется'}\n-# ${toggle.hint}`))
+        .setButtonAccessory(
+          on
+            ? button(`settings:xp-toggle:${key}`, 'Выключить', ButtonStyle.Secondary)
+            : button(`settings:xp-toggle:${key}`, 'Включить', ButtonStyle.Success),
+        ),
     );
   }
 
@@ -442,6 +502,384 @@ function ruleView(guild, type, id, notice) {
   return view(container, notice);
 }
 
+// ───────────── категория «Повышение уровня» ─────────────
+
+// Шаблон показываем как есть; тройные кавычки ломали бы блок кода
+const showTemplate = (t) => '```\n' + t.replace(/```/g, '`​``') + '\n```';
+
+function levelUpView(user, notice) {
+  const { enabled, message } = store.levelUp;
+  const sampleReward = store.rewardList()[0]?.roleId;
+  const preview = renderLevelUp(message, {
+    userId: user.id,
+    name: user.displayName ?? user.username,
+    level: 5,
+    rewards: sampleReward ? [sampleReward] : [],
+  });
+
+  const container = frame('levelup', '🎉 Повышение уровня', 'Сообщение, которое бот отправляет в канал, когда участник получает новый уровень.')
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(
+            enabled
+              ? '🔔 **Сообщение** · включено\n-# Бот поздравляет участника в канале, где тот написал.'
+              : '🔕 **Сообщение** · выключено\n-# Уровни и роли-награды выдаются молча.',
+          ),
+        )
+        .setButtonAccessory(
+          enabled
+            ? button('settings:lu-toggle', 'Выключить', ButtonStyle.Secondary)
+            : button('settings:lu-toggle', 'Включить', ButtonStyle.Success),
+        ),
+    )
+    .addSeparatorComponents(divider())
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(`**✏️ Текст сообщения**\n${showTemplate(message)}`))
+        .setButtonAccessory(button('settings:lu-edit', 'Изменить', ButtonStyle.Primary, '✏️')),
+    )
+    .addTextDisplayComponents(
+      text(
+        '-# Переменные: ' +
+          Object.entries(PLACEHOLDERS)
+            .map(([k, v]) => `\`${k}\` — ${v}`)
+            .join(' · ') +
+          '. Если `{rewards}` нет в тексте, награда допишется отдельной строкой.',
+      ),
+    )
+    .addSeparatorComponents(divider())
+    .addTextDisplayComponents(
+      text(`**👁️ Предпросмотр** (уровень 5${sampleReward ? ', с наградой' : ''})\n${preview.split('\n').map((l) => `> ${l}`).join('\n')}`),
+    )
+    .addActionRowComponents(row(button('settings:lu-reset', 'Сбросить текст', ButtonStyle.Secondary, '🔄')));
+
+  return view(container, notice);
+}
+
+function buildLevelUpModal() {
+  return new ModalBuilder()
+    .setCustomId('settings-modal:lu')
+    .setTitle('Сообщение о повышении уровня')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('message')
+          .setLabel('Текст ({user} {name} {level} {rewards})')
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setMaxLength(LEVEL_UP_MAX_LENGTH)
+          .setValue(store.levelUp.message),
+      ),
+    );
+}
+
+// ───────────── категория «Другое» ─────────────
+
+const hasMembersIntent = (client) => client.options.intents.has(GatewayIntentBits.GuildMembers);
+
+function cardSummary() {
+  const c = store.card;
+  const custom = ['accent', 'accent2', 'background'].some((k) => c[k] !== DEFAULT_CARD[k]);
+  if (c.hasImage) return 'своя картинка на фоне';
+  return custom ? 'свои цвета' : 'стандартное оформление';
+}
+
+function topRolesSummary() {
+  const count = store.topRoleList().length;
+  if (count === 0) return 'не настроены';
+  return `${count} ${plural(count, 'правило', 'правила', 'правил')}`;
+}
+
+function toggleButton(customId, on) {
+  return on ? button(customId, 'Выключить', ButtonStyle.Secondary) : button(customId, 'Включить', ButtonStyle.Success);
+}
+
+function otherView(client, notice) {
+  const { resetOnLeave, resetOnBan } = store.other;
+  const leaveHint = hasMembersIntent(client)
+    ? 'Ушедший участник теряет весь опыт и место в топе; вернётся — начнёт с нуля.'
+    : '⚠️ Сейчас не сработает: включите **Server Members Intent** (Developer Portal → Bot → Privileged Gateway Intents) и перезапустите бота.';
+
+  const container = frame('other', '🧩 Другое', 'Оформление ранг-карты, обнуление опыта и роли за места в топе.')
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(`**🎨 Ранг-карта** · ${cardSummary()}\n-# Цвета, фон и картинка карточки /rank для всех участников.`))
+        .setButtonAccessory(button('settings:cd-open', 'Настроить', ButtonStyle.Primary, '🎨')),
+    )
+    .addSeparatorComponents(divider())
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(`**🚪 Обнулять опыт при выходе** · ${resetOnLeave ? 'включено' : 'выключено'}\n-# ${leaveHint}`),
+        )
+        .setButtonAccessory(toggleButton('settings:ot-leave', resetOnLeave)),
+    )
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(
+            `**🔨 Обнулять опыт при бане** · ${resetOnBan ? 'включено' : 'выключено'}\n` +
+              '-# Работает и при выключенном обнулении при выходе.',
+          ),
+        )
+        .setButtonAccessory(toggleButton('settings:ot-ban', resetOnBan)),
+    )
+    .addSeparatorComponents(divider())
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(`**🥇 Роли за место в топе** · ${topRolesSummary()}\n-# Роль держит тот, кто занимает место в /leaderboard.`),
+        )
+        .setButtonAccessory(button('settings:tr-page:0', 'Настроить', ButtonStyle.Primary, '🥇')),
+    );
+
+  return view(container, notice);
+}
+
+// ── Ранг-карта ──
+
+const PREVIEW_NAME = 'card-preview.png';
+
+// С предпросмотром на карточке самого администратора; рендер долгий — вызывать после deferUpdate
+async function cardView(interaction, notice) {
+  const c = store.card;
+  const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+  const png = await renderUserCard(interaction.user, member);
+
+  const accent = c.accent2 ? `\`${c.accent}\` → \`${c.accent2}\`` : `\`${c.accent}\` → авто`;
+  const container = frame('other', '🎨 Ранг-карта', 'Оформление карточки /rank для всех участников. Ниже — предпросмотр на вашей карточке.')
+    .addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(`attachment://${PREVIEW_NAME}`)),
+    )
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(`**🎨 Цвета** · акцент ${accent} · фон \`${c.background}\`\n-# Акцент — полоса прогресса, уровень и обводка аватара.`),
+        )
+        .setButtonAccessory(button('settings:cd-colors', 'Изменить', ButtonStyle.Primary, '✏️')),
+    )
+    .addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          text(
+            (c.hasImage
+              ? `**🖼️ Фоновая картинка** · установлена, затемнение ${c.dim}%`
+              : '**🖼️ Фоновая картинка** · не задана') +
+              `\n-# PNG, JPG, WEBP или GIF до ${MAX_BACKGROUND_BYTES / 1024 / 1024} МБ; обрезается под карточку.`,
+          ),
+        )
+        .setButtonAccessory(
+          button('settings:cd-image', c.hasImage ? 'Изменить' : 'Загрузить', ButtonStyle.Primary, '🖼️'),
+        ),
+    )
+    .addActionRowComponents(
+      row(
+        button('settings:cd-image-del', 'Убрать картинку', ButtonStyle.Secondary, '🗑️').setDisabled(!c.hasImage),
+        button('settings:cd-reset', 'Сбросить оформление', ButtonStyle.Secondary, '🔄'),
+        button('settings:ot-open', 'Назад', ButtonStyle.Secondary, '↩️'),
+      ),
+    );
+
+  return view(container, notice, [new AttachmentBuilder(png, { name: PREVIEW_NAME })]);
+}
+
+// Белый текст карточки плохо читается на светлом фоне
+const lightWarning = (hex) =>
+  luminance(hex) > 0.4 ? ' ⚠️ Фон светлый — белый текст на карточке может плохо читаться.' : '';
+
+function label(title, description, component) {
+  const l = new LabelBuilder().setLabel(title);
+  if (description) l.setDescription(description);
+  return component instanceof FileUploadBuilder ? l.setFileUploadComponent(component) : l.setTextInputComponent(component);
+}
+
+function shortInput(id, value, placeholder, { required = true, maxLength = 7 } = {}) {
+  const field = new TextInputBuilder()
+    .setCustomId(id)
+    .setStyle(TextInputStyle.Short)
+    .setRequired(required)
+    .setMaxLength(maxLength)
+    .setPlaceholder(placeholder);
+  if (value != null && value !== '') field.setValue(String(value));
+  return field;
+}
+
+function buildColorsModal() {
+  const c = store.card;
+  return new ModalBuilder()
+    .setCustomId('settings-modal:cd-colors')
+    .setTitle('Цвета ранг-карты')
+    .addLabelComponents(
+      label('Цвет акцента', 'HEX, например #3f7cff', shortInput('accent', c.accent, '#3f7cff')),
+      label('Второй цвет градиента', 'Пусто — подберётся автоматически', shortInput('accent2', c.accent2, '#35d0ff', { required: false })),
+      label('Цвет фона', 'Лучше тёмный: текст на карточке белый', shortInput('background', c.background, '#151822')),
+    );
+}
+
+function buildImageModal() {
+  const c = store.card;
+  return new ModalBuilder()
+    .setCustomId('settings-modal:cd-image')
+    .setTitle('Фоновая картинка')
+    .addLabelComponents(
+      label(
+        'Картинка',
+        c.hasImage ? 'Оставьте пустым, чтобы сохранить текущую' : 'Загрузите файл или укажите ссылку ниже',
+        new FileUploadBuilder().setCustomId('file').setRequired(false).setMinValues(0).setMaxValues(1),
+      ),
+      label('Или ссылка на картинку', 'https://…', shortInput('url', null, 'https://example.com/bg.png', { required: false, maxLength: 1000 })),
+      label(
+        'Затемнение, %',
+        `От ${LIMITS.dim.min} до ${LIMITS.dim.max}: чем больше, тем лучше читается текст`,
+        shortInput('dim', c.dim, String(DEFAULT_CARD.dim), { maxLength: 3 }),
+      ),
+    );
+}
+
+// { patch } или { error }
+function validateColors(fields) {
+  const accent = parseHex(fields.getTextInputValue('accent'));
+  const background = parseHex(fields.getTextInputValue('background'));
+  const rawAccent2 = fields.getTextInputValue('accent2').trim();
+  const accent2 = rawAccent2 ? parseHex(rawAccent2) : null;
+  if (!accent || !background || (rawAccent2 && !accent2)) {
+    return { error: 'Цвет указывается в HEX: #3f7cff или #38f.' };
+  }
+  return { patch: { accent, accent2, background } };
+}
+
+// ── Роли за место в топе ──
+
+const topKey = ({ from, to }) => `${from}-${to}`;
+const topLabel = ({ from, to }) => (from === to ? `${from} место` : `${from}–${to} места`);
+const topShort = ({ from, to }) => (from === to ? `#${from}` : `#${from}–${to}`);
+
+function parseTopKey(key) {
+  const [from, to] = String(key).split('-').map(Number);
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return null;
+  if (from < LIMITS.top.min || to > LIMITS.top.max || from > to) return null;
+  return { from, to };
+}
+
+// «5», «#5», «1-3», «1 – 3» → { from, to } или { error }
+function parsePositions(raw) {
+  const m = String(raw).trim().replace(/#/g, '').match(/^(\d+)\s*(?:[-–—]\s*(\d+))?$/);
+  const { min, max } = LIMITS.top;
+  const err = { error: `Укажите место (5) или диапазон (1-3), от ${min} до ${max}.` };
+  if (!m) return err;
+  const from = Number(m[1]);
+  const to = m[2] === undefined ? from : Number(m[2]);
+  if (from < min || to > max || from > to) return err;
+  return { from, to };
+}
+
+function topPageOf(from, to) {
+  const idx = store.topRoleList().findIndex((r) => r.from === from && r.to === to);
+  return idx === -1 ? 0 : Math.floor(idx / TOP_ROLES_PER_PAGE);
+}
+
+function describeTopRole(guild, rule) {
+  const role = guild.roles.cache.get(rule.roleId);
+  if (!role) return `**${topShort(rule)}** → \`роль удалена\` ⚠️`;
+  return `**${topShort(rule)}** → <@&${rule.roleId}>${role.editable ? '' : ' ⚠️'}`;
+}
+
+async function topRolesView(guild, page = 0, notice) {
+  await guild.members.fetchMe().catch(() => null); // для проверки role.editable
+  const list = store.topRoleList();
+  const pages = Math.max(1, Math.ceil(list.length / TOP_ROLES_PER_PAGE));
+  const current = Math.min(Math.max(0, Number(page) || 0), pages - 1);
+  const slice = list.slice(current * TOP_ROLES_PER_PAGE, (current + 1) * TOP_ROLES_PER_PAGE);
+  const broken = list.some(({ roleId }) => !guild.roles.cache.get(roleId)?.editable);
+
+  const container = frame(
+    'other',
+    '🥇 Роли за место в топе',
+    'Роль получает тот, кто занимает место в /leaderboard, и теряет, когда опускается ниже. ' +
+      'Можно указать одно место (`5`) или диапазон (`1-3`).',
+  );
+
+  if (slice.length === 0) {
+    container.addTextDisplayComponents(text('*Ролей пока нет — нажмите «Добавить роль».*'));
+  }
+  for (const rule of slice) {
+    container.addSectionComponents(
+      new SectionBuilder()
+        .addTextDisplayComponents(text(describeTopRole(guild, rule)))
+        .setButtonAccessory(button(`settings:tr-edit:${topKey(rule)}`, 'Изменить', ButtonStyle.Secondary, '✏️')),
+    );
+  }
+  if (broken) {
+    container.addTextDisplayComponents(
+      text('-# ⚠️ Бот не может выдать роль: нужно право «Управление ролями» и роль бота выше этой роли в списке ролей сервера.'),
+    );
+  }
+
+  const controls = [button('settings:tr-add', 'Добавить роль', ButtonStyle.Success, '➕')];
+  if (pages > 1) {
+    controls.push(
+      button(`settings:tr-page:${current - 1}`, '◀', ButtonStyle.Secondary).setDisabled(current === 0),
+      button('settings:tr-noop', `${current + 1}/${pages}`, ButtonStyle.Secondary).setDisabled(true),
+      button(`settings:tr-page:${current + 1}`, '▶', ButtonStyle.Secondary).setDisabled(current === pages - 1),
+    );
+  }
+  controls.push(button('settings:ot-open', 'Назад', ButtonStyle.Secondary, '↩️'));
+
+  container.addSeparatorComponents(divider()).addActionRowComponents(row(...controls));
+  return view(container, notice);
+}
+
+function pickTopRoleView(guild, pos, notice) {
+  const existing = store.findTopRole(pos.from, pos.to);
+  const container = frame(
+    'other',
+    `🥇 Роль за ${topLabel(pos)}`,
+    `Выберите роль для ${pos.from === pos.to ? `**${pos.from}** места` : `мест **${pos.from}–${pos.to}**`} в топе.` +
+      (existing ? `\nСейчас: <@&${existing.roleId}>` : ''),
+  );
+
+  const select = new RoleSelectMenuBuilder()
+    .setCustomId(`settings:tr-pick:${topKey(pos)}`)
+    .setPlaceholder('Выберите роль…')
+    .setMinValues(1)
+    .setMaxValues(1);
+  if (existing && guild.roles.cache.has(existing.roleId)) select.setDefaultRoles(existing.roleId);
+
+  const actions = [];
+  if (existing) actions.push(button(`settings:tr-del:${topKey(pos)}`, 'Удалить', ButtonStyle.Danger, '🗑️'));
+  actions.push(button(`settings:tr-page:${topPageOf(pos.from, pos.to)}`, 'Отмена', ButtonStyle.Secondary, '✖️'));
+
+  container.addActionRowComponents(row(select)).addActionRowComponents(row(...actions));
+  return view(container, notice);
+}
+
+function buildTopModal() {
+  return new ModalBuilder()
+    .setCustomId('settings-modal:tr')
+    .setTitle('Роль за место в топе')
+    .addComponents(input('positions', `Место или диапазон (${LIMITS.top.min}–${LIMITS.top.max})`, undefined, 'например, 5 или 1-3'));
+}
+
+const topRolesFull = (from, to) => store.topRoleList().length >= MAX_TOP_ROLES && !store.findTopRole(from, to);
+
+// Одна роль не может быть и наградой за уровень, и ролью за топ: бот бы снимал её сам у себя
+const isRewardRole = (roleId) => Object.values(store.rewards.roles).includes(roleId);
+const isTopRole = (roleId) => store.topRoleList().some((r) => r.roleId === roleId);
+
+// Общие проверки выбранной роли: null или текст ошибки
+function roleProblem(guild, role) {
+  if (!role || role.id === guild.id) return 'Эту роль выбрать нельзя. Выберите другую.';
+  if (role.managed) return 'Эта роль управляется интеграцией или ботом — выдать её нельзя. Выберите другую.';
+  return null;
+}
+
+// Тяжёлые экраны (с картинкой или загрузкой) отвечают через deferUpdate, чтобы уложиться в 3 секунды
+async function slowUpdate(interaction, build) {
+  await interaction.deferUpdate();
+  return interaction.editReply(await build());
+}
+
 // ───────────── модальные окна ─────────────
 
 function input(id, label, value, placeholder, { required = true, maxLength = 10 } = {}) {
@@ -603,6 +1041,8 @@ module.exports = {
         const category = interaction.values[0];
         if (category === 'rewards') return interaction.update(await rewardsView(guild));
         if (category === 'multipliers') return interaction.update(multipliersView(guild));
+        if (category === 'levelup') return interaction.update(levelUpView(interaction.user));
+        if (category === 'other') return interaction.update(otherView(interaction.client));
         return interaction.update(xpView());
       }
 
@@ -612,9 +1052,28 @@ module.exports = {
         if (modal) await interaction.showModal(modal);
         return;
       }
+      case 'xp-toggle': {
+        const toggle = XP_TOGGLES[arg];
+        if (!toggle) return interaction.update(xpView());
+        const enabled = store.settings[toggle.field] === false;
+        store.updateSettings({ [toggle.field]: enabled });
+        return interaction.update(xpView(`✅ ${toggle.title}: ${enabled ? 'включён' : 'выключен'}.`));
+      }
       case 'reset':
         store.updateSettings({ ...DEFAULT_SETTINGS });
         return interaction.update(xpView('🔄 Параметры опыта сброшены по умолчанию.'));
+
+      // Категория «Повышение уровня»
+      case 'lu-toggle': {
+        const enabled = !store.levelUp.enabled;
+        store.updateLevelUp({ enabled });
+        return interaction.update(levelUpView(interaction.user, `✅ Сообщение о повышении ${enabled ? 'включено' : 'выключено'}.`));
+      }
+      case 'lu-edit':
+        return interaction.showModal(buildLevelUpModal());
+      case 'lu-reset':
+        store.updateLevelUp({ message: DEFAULT_LEVEL_UP.message });
+        return interaction.update(levelUpView(interaction.user, '🔄 Текст сброшен по умолчанию.'));
 
       // Категория «Роли награды»
       case 'rw-page':
@@ -654,14 +1113,10 @@ module.exports = {
           return interaction.update(await rewardsView(guild, 0, `❌ Можно настроить не более ${MAX_REWARDS} наград.`));
         }
         const role = guild.roles.cache.get(interaction.values[0]);
-        if (!role || role.id === guild.id) {
-          return interaction.update(pickRoleView(guild, level, '❌ Эту роль выбрать нельзя. Выберите другую.'));
-        }
-        if (role.managed) {
-          return interaction.update(
-            pickRoleView(guild, level, '❌ Эта роль управляется интеграцией или ботом — выдать её нельзя. Выберите другую.'),
-          );
-        }
+        const problem =
+          roleProblem(guild, role) ??
+          (isTopRole(role.id) ? 'Эта роль уже выдаётся за место в топе (/settings → «Другое»). Выберите другую.' : null);
+        if (problem) return interaction.update(pickRoleView(guild, level, `❌ ${problem}`));
         store.setReward(level, role.id);
         return interaction.update(
           await rewardsView(guild, pageOf(level), `✅ Награда за ${level} уровень сохранена: ${role.name}.`),
@@ -710,6 +1165,71 @@ module.exports = {
         store.removeMultiplier(type, arg2);
         return interaction.update(multipliersView(guild, page, '🗑️ Множитель удалён.'));
       }
+      // Категория «Другое»
+      case 'ot-open':
+        return interaction.update(otherView(interaction.client));
+      case 'ot-leave':
+      case 'ot-ban': {
+        const field = action === 'ot-leave' ? 'resetOnLeave' : 'resetOnBan';
+        const enabled = !store.other[field];
+        store.updateOther({ [field]: enabled });
+        const what = action === 'ot-leave' ? 'при выходе' : 'при бане';
+        return interaction.update(otherView(interaction.client, `✅ Обнуление опыта ${what} ${enabled ? 'включено' : 'выключено'}.`));
+      }
+
+      // Ранг-карта
+      case 'cd-open':
+        return slowUpdate(interaction, () => cardView(interaction));
+      case 'cd-colors':
+        return interaction.showModal(buildColorsModal());
+      case 'cd-image':
+        return interaction.showModal(buildImageModal());
+      case 'cd-image-del':
+        removeBackground();
+        store.updateCard({ hasImage: false });
+        return slowUpdate(interaction, () => cardView(interaction, '🗑️ Фоновая картинка убрана.'));
+      case 'cd-reset':
+        removeBackground();
+        store.updateCard({ ...DEFAULT_CARD });
+        return slowUpdate(interaction, () => cardView(interaction, '🔄 Оформление сброшено по умолчанию.'));
+
+      // Роли за место в топе: arg = «от-до»
+      case 'tr-page':
+        return interaction.update(await topRolesView(guild, Number(arg)));
+      case 'tr-noop':
+        return interaction.deferUpdate();
+      case 'tr-add':
+        return interaction.showModal(buildTopModal());
+      case 'tr-edit': {
+        const pos = parseTopKey(arg);
+        if (!pos || !store.findTopRole(pos.from, pos.to)) return interaction.update(await topRolesView(guild));
+        return interaction.update(pickTopRoleView(guild, pos));
+      }
+      case 'tr-del': {
+        const pos = parseTopKey(arg);
+        if (!pos) return interaction.update(await topRolesView(guild));
+        const page = topPageOf(pos.from, pos.to);
+        store.removeTopRole(pos.from, pos.to);
+        syncTopRoles(guild); // роль снимется с тех, кто держал её за это место
+        return interaction.update(await topRolesView(guild, page, `🗑️ Роль за ${topLabel(pos)} удалена и будет снята с участников.`));
+      }
+      case 'tr-pick': {
+        const pos = parseTopKey(arg);
+        if (!pos) return interaction.update(await topRolesView(guild));
+        if (topRolesFull(pos.from, pos.to)) {
+          return interaction.update(await topRolesView(guild, 0, `❌ Можно настроить не более ${MAX_TOP_ROLES} ролей за топ.`));
+        }
+        const role = guild.roles.cache.get(interaction.values[0]);
+        const problem =
+          roleProblem(guild, role) ??
+          (isRewardRole(role.id) ? 'Эта роль уже выдаётся за уровень («Роли награды»). Выберите другую.' : null);
+        if (problem) return interaction.update(pickTopRoleView(guild, pos, `❌ ${problem}`));
+        store.setTopRole(pos.from, pos.to, role.id);
+        syncTopRoles(guild);
+        return interaction.update(
+          await topRolesView(guild, topPageOf(pos.from, pos.to), `✅ Роль за ${topLabel(pos)} сохранена: ${role.name}.`),
+        );
+      }
       default:
         // Кнопки старых панелей (до перехода на Components V2 и до смены раскладки)
         return interaction.reply(ephemeral('Эта панель устарела — откройте /settings заново.'));
@@ -719,6 +1239,13 @@ module.exports = {
   async handleModal(interaction) {
     if (!isAdmin(interaction)) return interaction.reply(NO_ACCESS);
     const [, kind, typeArg, targetId] = interaction.customId.split(':');
+
+    if (kind === 'lu') {
+      const message = interaction.fields.getTextInputValue('message').trim();
+      if (!message) return interaction.reply(ephemeral('❌ Текст не может быть пустым. Чтобы не отправлять сообщение — выключите его.'));
+      store.updateLevelUp({ message: message.slice(0, LEVEL_UP_MAX_LENGTH) });
+      return interaction.update(levelUpView(interaction.user, '✅ Текст сохранён.'));
+    }
 
     if (kind === 'mx') {
       const type = MULTIPLIER_TYPES[typeArg];
@@ -732,6 +1259,55 @@ module.exports = {
       return interaction.update(
         multipliersView(interaction.guild, multiplierPageOf(type, targetId), `✅ Множитель ${formatMultiplier(value)} сохранён.`),
       );
+    }
+
+    if (kind === 'cd-colors') {
+      const { patch, error: colorError } = validateColors(interaction.fields);
+      if (colorError) return interaction.reply(ephemeral(`❌ ${colorError}`));
+      store.updateCard(patch);
+      return slowUpdate(interaction, () => cardView(interaction, `✅ Цвета сохранены.${lightWarning(patch.background)}`));
+    }
+
+    if (kind === 'cd-image') {
+      const dim = parseNumber(interaction.fields.getTextInputValue('dim'), { integer: true });
+      if (dim === null || dim < LIMITS.dim.min || dim > LIMITS.dim.max) {
+        return interaction.reply(ephemeral(`❌ Затемнение — целое число от ${LIMITS.dim.min} до ${LIMITS.dim.max}.`));
+      }
+      const file = interaction.fields.getUploadedFiles('file')?.first();
+      const url = interaction.fields.getTextInputValue('url').trim();
+      if (!file && !url && !store.card.hasImage) {
+        return interaction.reply(ephemeral('❌ Загрузите картинку или укажите ссылку на неё.'));
+      }
+      if (file && file.contentType && !file.contentType.startsWith('image/')) {
+        return interaction.reply(ephemeral('❌ Это не картинка. Подойдут PNG, JPG, WEBP или GIF.'));
+      }
+      if (file && file.size > MAX_BACKGROUND_BYTES) {
+        return interaction.reply(ephemeral(`❌ Картинка больше ${MAX_BACKGROUND_BYTES / 1024 / 1024} МБ.`));
+      }
+
+      // Скачивание и обработка картинки могут занять несколько секунд
+      await interaction.deferUpdate();
+      let notice = '✅ Затемнение сохранено.';
+      if (file || url) {
+        try {
+          await setBackground(file ? file.url : url);
+          notice = '✅ Фоновая картинка установлена.';
+        } catch (err) {
+          store.updateCard({ dim });
+          return interaction.editReply(await cardView(interaction, `❌ ${err.message}`));
+        }
+      }
+      store.updateCard({ hasImage: true, dim });
+      return interaction.editReply(await cardView(interaction, notice));
+    }
+
+    if (kind === 'tr') {
+      const pos = parsePositions(interaction.fields.getTextInputValue('positions'));
+      if (pos.error) return interaction.reply(ephemeral(`❌ ${pos.error}`));
+      if (topRolesFull(pos.from, pos.to)) {
+        return interaction.reply(ephemeral(`❌ Можно настроить не более ${MAX_TOP_ROLES} ролей за топ.`));
+      }
+      return interaction.update(pickTopRoleView(interaction.guild, pos));
     }
 
     const { patch, level, error } = validate(kind, interaction.fields);

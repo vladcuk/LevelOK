@@ -20,9 +20,16 @@ function levelInfo(totalXp) {
   };
 }
 
+// Суммарный опыт, при котором участник оказывается в самом начале уровня `level`
+function totalXpForLevel(level) {
+  let total = 0;
+  for (let l = 0; l < level; l++) total += xpForLevel(l);
+  return total;
+}
+
 function randomXp({ xpMin, xpMax, multiplier }) {
   const base = Math.floor(Math.random() * (xpMax - xpMin + 1)) + xpMin;
   return Math.max(0, Math.round(base * multiplier));
 }
 
-module.exports = { xpForLevel, levelInfo, randomXp };
+module.exports = { xpForLevel, levelInfo, totalXpForLevel, randomXp };
