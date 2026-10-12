@@ -2,6 +2,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, MessageFlags } = require('disc
 const { store } = require('./store');
 const { levelInfo, totalXpForLevel, xpForLevel } = require('./levels');
 const { applyRewards } = require('./rewards');
+const { syncTopRoles } = require('./toproles');
 const { formatCompact } = require('./format');
 
 const MAX_LEVEL = 1000;
@@ -91,6 +92,7 @@ async function run(interaction, kind) {
   await interaction.deferReply();
   const member = await interaction.guild.members.fetch(user.id).catch(() => null);
   const { added, removed } = await applyRewards(member, after.level, { revokeAbove: after.level < before.level });
+  await syncTopRoles(interaction.guild);
 
   const diff = data.xp - before.total;
   const lines = [

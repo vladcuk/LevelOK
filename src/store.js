@@ -27,6 +27,27 @@ const DEFAULT_REWARDS = {
   roles: {},
 };
 
+// Оформление ранг-карты. accent2 = null — второй цвет градиента подбирается сам.
+// hasImage — в data/ лежит фоновая картинка (см. background.js), dim — её затемнение в %.
+const DEFAULT_CARD = {
+  accent: '#3f7cff',
+  accent2: '#35d0ff',
+  background: '#151822',
+  hasImage: false,
+  dim: 55,
+};
+
+// Обнуление опыта участника, когда он покидает сервер или получает бан
+const DEFAULT_OTHER = {
+  resetOnLeave: false,
+  resetOnBan: false,
+};
+
+// Роли за место в топе: rules — [{ from, to, roleId }] (from === to — одно место),
+// holders — { roleId: [userId] }: кому бот выдал роль, чтобы снять её без кэша участников.
+const isValidTopRule = (r) =>
+  r && Number.isInteger(r.from) && Number.isInteger(r.to) && r.from >= 1 && r.to >= r.from && typeof r.roleId === 'string';
+
 // Множители на каналы/категории и роли. Правило: { type: 'channel' | 'role', id, value,
 // expiresAt (мс с эпохи или null — бессрочно), createdAt }. На одну цель — одно правило.
 // При начислении опыта действует наибольший из подходящих множителей (см. multipliers.js).
@@ -46,6 +67,9 @@ class Store {
       rewards: { ...DEFAULT_REWARDS, roles: {} },
       multipliers: { rules: [] },
       levelUp: { ...DEFAULT_LEVEL_UP },
+      card: { ...DEFAULT_CARD },
+      other: { ...DEFAULT_OTHER },
+      topRoles: { rules: [], holders: {} },
       users: {},
     };
     this.saveTimer = null;
@@ -67,6 +91,12 @@ class Store {
           .map((r) => ({ ...r, expiresAt: r.expiresAt ?? null, createdAt: r.createdAt ?? Date.now() })),
       };
       this.data.levelUp = { ...DEFAULT_LEVEL_UP, ...raw.levelUp };
+      this.data.card = { ...DEFAULT_CARD, ...raw.card };
+      this.data.other = { ...DEFAULT_OTHER, ...raw.other };
+      this.data.topRoles = {
+        rules: (Array.isArray(raw.topRoles?.rules) ? raw.topRoles.rules : []).filter(isValidTopRule),
+        holders: { ...raw.topRoles?.holders },
+      };
       this.data.users = raw.users ?? {};
     } catch (err) {
       console.error('[store] Не удалось прочитать db.json, начинаю с пустой базы:', err);
@@ -107,6 +137,61 @@ class Store {
 
   updateLevelUp(patch) {
     Object.assign(this.data.levelUp, patch);
+    this.scheduleSave();
+  }
+
+  get card() {
+    return this.data.card;
+  }
+
+  updateCard(patch) {
+    Object.assign(this.data.card, patch);
+    this.scheduleSave();
+  }
+
+  get other() {
+    return this.data.other;
+  }
+
+  updateOther(patch) {
+    Object.assign(this.data.other, patch);
+    this.scheduleSave();
+  }
+
+  // Правила ролей за топ, по возрастанию места
+  topRoleList() {
+    return [...this.data.topRoles.rules].sort((a, b) => a.from - b.from || a.to - b.to);
+  }
+
+  findTopRole(from, to) {
+    return this.data.topRoles.rules.find((r) => r.from === from && r.to === to) ?? null;
+  }
+
+  // Правило на те же места заменяется
+  setTopRole(from, to, roleId) {
+    const existing = this.findTopRole(from, to);
+    if (existing) existing.roleId = roleId;
+    else this.data.topRoles.rules.push({ from, to, roleId });
+    this.scheduleSave();
+  }
+
+  removeTopRole(from, to) {
+    this.data.topRoles.rules = this.data.topRoles.rules.filter((r) => !(r.from === from && r.to === to));
+    this.scheduleSave();
+  }
+
+  topRoleHolders(roleId) {
+    return this.data.topRoles.holders[roleId] ?? [];
+  }
+
+  // Все роли, которые бот когда-либо выдал за топ и ещё не снял
+  topRoleHeld() {
+    return Object.keys(this.data.topRoles.holders);
+  }
+
+  setTopRoleHolders(roleId, userIds) {
+    if (userIds.length) this.data.topRoles.holders[roleId] = userIds;
+    else delete this.data.topRoles.holders[roleId];
     this.scheduleSave();
   }
 
@@ -184,6 +269,14 @@ class Store {
     this.scheduleSave();
   }
 
+  // Полностью удаляет участника из базы (обнуление опыта); true — если было что удалять
+  deleteUser(id) {
+    if (!(id in this.data.users)) return false;
+    delete this.data.users[id];
+    this.scheduleSave();
+    return true;
+  }
+
   // Все пользователи, отсортированные по опыту (по убыванию)
   ranking() {
     return Object.entries(this.data.users)
@@ -198,4 +291,4 @@ class Store {
   }
 }
 
-module.exports = { store: new Store(), DEFAULT_SETTINGS, DEFAULT_LEVEL_UP };
+module.exports = { store: new Store(), DEFAULT_SETTINGS, DEFAULT_LEVEL_UP, DEFAULT_CARD };

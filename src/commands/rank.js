@@ -1,7 +1,5 @@
 const { SlashCommandBuilder, AttachmentBuilder, MessageFlags } = require('discord.js');
-const { store } = require('../store');
-const { levelInfo } = require('../levels');
-const { renderRankCard } = require('../card');
+const { renderUserCard } = require('../rankcard');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -18,17 +16,7 @@ module.exports = {
     await interaction.deferReply();
 
     const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    const data = store.getUser(user.id);
-    const info = levelInfo(data.xp);
-
-    const png = await renderRankCard({
-      displayName: member?.displayName ?? user.globalName ?? user.username,
-      username: user.username,
-      avatarUrl: (member ?? user).displayAvatarURL({ extension: 'png', size: 256, forceStatic: true }),
-      rank: store.rankOf(user.id),
-      messages: data.messages,
-      ...info,
-    });
+    const png = await renderUserCard(user, member);
 
     await interaction.editReply({ files: [new AttachmentBuilder(png, { name: 'rank.png' })] });
   },
